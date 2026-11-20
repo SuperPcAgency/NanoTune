@@ -1,15 +1,15 @@
 # NanoTune
 
-NanoTune is a lightweight, 100% offline Windows music player and high-FPS lyrics engine developed by **mirakwgnr** (`@mirakwgnr` on Instagram). Built for instant library indexing and smooth high-refresh-rate rendering across both modern and legacy PC hardware, it pairs adaptive cover-art theming with a threaded real-time audio FX rack and a word-by-word karaoke lyrics view[cite: 3, 5, 11].
+NanoTune is a lightweight, 100% offline Windows music player and high-FPS lyrics engine developed by **mirakwgnr** (`@mirakwgnr` on Instagram). Built for instant library indexing and smooth high-refresh-rate rendering across both modern and legacy PC hardware, it pairs adaptive cover-art theming with a threaded real-time audio FX rack and a word-by-word karaoke lyrics view.
 
 ## Features
 
-* **Audio Playback:** Plays local FLAC (16/24-bit), WAV, MP3, M4A, OGG, and OPUS files across multiple music directories with optional subfolder scanning and metadata caching[cite: 3, 5].
-* **Adaptive Cover Theming:** Extracts theme accents dynamically from album artwork—shifting the UI, active controls, and Star icon to match each cover, with a neutral silver-grey fallback for monochrome/B&W artwork[cite: 3, 5, 11].
-* **Real-Time Audio FX Rack:** Adjust playback speed and pitch (with optional pitch-speed linking), warm 155 Hz sub-bass boost, hall reverb, and an independent 1400 Hz Lo-Fi Muffle filter, plus quick presets (`Normal`, `Lo-Fi Muffle`, `Slowed + Reverb`, `Warm Bass`, `Sped Up`)[cite: 3, 5, 11].
-* **Synced & Word-by-Word Lyrics:** Supports `.ELRC` word timestamps, standard `.LRC` files, and embedded FLAC / ID3 / MP4 lyrics, complete with click-to-seek lines and a built-in editor with live timestamp stamping[cite: 3, 5, 10].
-* **Hardware Renderer Auto-Detection:** Probes DirectX 10.1/10.0 and OpenGL 2.1/2.0 capabilities on startup, with manual switching between DirectX, OpenGL, and CPU Software Rendering in **Settings**[cite: 3, 4, 5].
-* **Windows Shell & Controls:** Includes Windows 10/11 SMTC media transport/thumbnail integration, system tray controls, a collapsible sidebar, `Space` to play/pause, and `F11` for fullscreen[cite: 3, 5, 6].
+* **Audio Playback:** Plays local FLAC (16/24-bit), WAV, MP3, M4A, OGG, and OPUS files across multiple music directories with optional subfolder scanning and metadata caching.
+* **Adaptive Cover Theming:** Extracts theme accents dynamically from album artwork—shifting the UI, active controls, and Star icon to match each cover, with a neutral silver-grey fallback for monochrome/B&W artwork.
+* **Real-Time Audio FX Rack:** Adjust playback speed and pitch (with optional pitch-speed linking), warm 155 Hz sub-bass boost, hall reverb, and an independent 1400 Hz Lo-Fi Muffle filter, plus quick presets (`Normal`, `Lo-Fi Muffle`, `Slowed + Reverb`, `Warm Bass`, `Sped Up`).
+* **Synced & Word-by-Word Lyrics:** Supports `.ELRC` word timestamps, standard `.LRC` files, and embedded FLAC / ID3 / MP4 lyrics, complete with click-to-seek lines and a built-in editor with live timestamp stamping.
+* **Hardware Renderer Auto-Detection:** Probes DirectX 10.1/10.0 and OpenGL 2.1/2.0 capabilities on startup, with manual switching between DirectX, OpenGL, and CPU Software Rendering in **Settings**.
+* **Windows Shell & Controls:** Includes Windows 10/11 SMTC media transport/thumbnail integration, system tray controls, a collapsible sidebar, `Space` to play/pause, and `F11` for fullscreen.
 
 ## System Requirements
 
@@ -26,20 +26,20 @@ NanoTune is a lightweight, 100% offline Windows music player and high-FPS lyrics
 
 ## Installation & Quick Start
 
-1. Download and run the NanoTune installer (close any running instances first)[cite: 5].
-2. On first launch, choose one or more music directories[cite: 4]. You can add or remove folders anytime under **Settings**[cite: 3, 4].
-3. Browse your library via **Tracks**, **Albums**, or **Now Playing & Lyrics** from the sidebar[cite: 4].
-4. Click **FX** on the bottom player bar to open the audio effects drawer, or click **Enter / Edit Lyrics** on the lyrics screen to add timestamps and save `.LRC`/`.ELRC` files or embed tags[cite: 3, 4, 10].
+1. Download and run the NanoTune installer (close any running instances first).
+2. On first launch, choose one or more music directories. You can add or remove folders anytime under **Settings**.
+3. Browse your library via **Tracks**, **Albums**, or **Now Playing & Lyrics** from the sidebar.
+4. Click **FX** on the bottom player bar to open the audio effects drawer, or click **Enter / Edit Lyrics** on the lyrics screen to add timestamps and save `.LRC`/`.ELRC` files or embed tags.
 
 ## User Data & Diagnostics
 
-* **Config & Cached Covers:** `%APPDATA%\NanoTune\config.json` and `%APPDATA%\NanoTune\covers`[cite: 4]
-* **Crash Log:** `%APPDATA%\NanoTune\crash.log`[cite: 4]
-* **Registry Key:** `HKEY_CURRENT_USER\Software\NanoTune`[cite: 4]
-* **Uninstall:** Remove anytime via Windows **Installed Apps**[cite: 4].
+* **Config & Cached Covers:** `%APPDATA%\NanoTune\config.json` and `%APPDATA%\NanoTune\covers`
+* **Crash Log:** `%APPDATA%\NanoTune\crash.log`
+* **Registry Key:** `HKEY_CURRENT_USER\Software\NanoTune`
+* **Uninstall:** Remove anytime via Windows **Installed Apps**.
 
 ## Privacy & License
 
-NanoTune operates strictly offline as a local desktop audio player with no telemetry, analytics, or external network calls[cite: 5, 6].
+NanoTune operates strictly offline as a local desktop audio player with no telemetry, analytics, or external network calls.
 
-Licensed under the **GNU General Public License v2.0 (GPL-2.0)**[cite: 6]. See `LICENCE.txt` or the [full GPL-2.0 license text](https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt) for details[cite: 6].
+Licensed under the **GNU General Public License v2.0 (GPL-2.0)**. See `LICENCE.txt` or the [full GPL-2.0 license text](https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt) for details.
