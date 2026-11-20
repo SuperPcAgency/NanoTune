@@ -22,7 +22,7 @@ NanoTune is a lightweight, 100% offline Windows music player and high-FPS lyrics
 | **Storage** | 150 MB available disk space | 250 MB+ SSD (for cover cache) |
 | **Audio** | DirectSound / WASAPI compatible sound device | WASAPI Exclusive-capable DAC or onboard audio chipset |
 
-*\*Legacy Windows 7/8/8.1 environments require compatible runtime builds and omit the Windows 10/11 SMTC lockscreen/volume overlay[cite: 5].*
+*\*Legacy Windows 7/8/8.1 environments require compatible runtime builds and omit the Windows 10/11 SMTC lockscreen/volume overlay.*
 
 ## Installation & Quick Start
 
