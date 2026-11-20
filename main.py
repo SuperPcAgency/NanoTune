@@ -20,36 +20,56 @@ from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
-# Pre-Launch Dependency Check
+# Pre-Launch Dependency Check (Windows 7/8/8.1 & Windows 10/11 Aware)
 # ---------------------------------------------------------------------------
+def is_legacy_windows() -> bool:
+    if sys.platform != "win32":
+        return False
+    try:
+        return sys.getwindowsversion().major < 10
+    except Exception:
+        return False
+
+
+IS_LEGACY_WIN = is_legacy_windows()
+
+
 def check_and_prompt_dependencies():
     if getattr(sys, "frozen", False) or "--export-icon" in sys.argv:
         return
-    vital = [("PySide6", "PySide6"), ("mutagen", "mutagen"), ("PIL", "Pillow")]
-    optional_pkgs = [
-        ("numpy", "numpy"),
-        ("av", "av"),
-        ("winrt.windows.media", "winrt-runtime"),
-        ("winrt.windows.media", "winrt-Windows.Foundation"),
-        ("winrt.windows.media", "winrt-Windows.Media"),
-        ("winrt.windows.storage.streams", "winrt-Windows.Storage.Streams"),
-    ]
+
+    if IS_LEGACY_WIN:
+        vital = [("PySide6", "PySide6<6.5"), ("mutagen", "mutagen"), ("PIL", "Pillow<10.3")]
+        optional_pkgs = [("numpy", "numpy<1.25"), ("av", "av<11.0")]
+    else:
+        vital = [("PySide6", "PySide6"), ("mutagen", "mutagen"), ("PIL", "Pillow")]
+        optional_pkgs = [
+            ("numpy", "numpy"),
+            ("av", "av"),
+            ("winrt.runtime", "winrt-runtime"),
+            ("winrt.windows.foundation", "winrt-Windows.Foundation"),
+            ("winrt.windows.media", "winrt-Windows.Media"),
+            ("winrt.windows.media.interop", "winrt-Windows.Media.Interop"),
+            ("winrt.windows.media.playback", "winrt-Windows.Media.Playback"),
+            ("winrt.windows.storage.streams", "winrt-Windows.Storage.Streams"),
+        ]
+
     missing_vital = [pip for mod, pip in vital if importlib.util.find_spec(mod) is None]
     missing_opt = []
     for mod, pip in optional_pkgs:
         if importlib.util.find_spec(mod) is None and pip not in missing_opt:
             missing_opt.append(pip)
 
-    if missing_vital:
+    if missing_vital or missing_opt:
         all_missing = missing_vital + missing_opt
-        print("[NanoTune] Missing vital packages:", ", ".join(missing_vital))
+        print("[NanoTune] Missing packages:", ", ".join(all_missing))
         try:
             ans = input(f"Download and install {', '.join(all_missing)} now? [Y/n]: ").strip().lower()
         except Exception:
             ans = "y"
         if ans in ("", "y", "yes"):
             subprocess.check_call([sys.executable, "-m", "pip", "install", *all_missing])
-        else:
+        elif missing_vital:
             sys.exit(1)
 
 
@@ -71,18 +91,36 @@ except Exception:
     av = None
     HAS_FX_DSP = False
 
-try:
-    from winrt.windows.media.interop import get_for_window as winrt_smtc_for_window
-    from winrt.windows.media import (
-        MediaPlaybackStatus,
-        MediaPlaybackType,
-        SystemMediaTransportControlsButton,
-    )
-    from winrt.windows.foundation import Uri as WinRtUri
-    from winrt.windows.storage.streams import RandomAccessStreamReference
-    HAS_WINRT_SMTC = True
-except Exception:
-    HAS_WINRT_SMTC = False
+HAS_WINRT_SMTC = False
+winrt_smtc_for_window = None
+WinRtMediaPlayer = None
+
+if not IS_LEGACY_WIN:
+    try:
+        from winrt.windows.media import (
+            MediaPlaybackStatus,
+            MediaPlaybackType,
+            SystemMediaTransportControlsButton,
+        )
+        from winrt.windows.foundation import Uri as WinRtUri
+        from winrt.windows.storage import StorageFile
+        from winrt.windows.storage.streams import (
+            DataWriter,
+            InMemoryRandomAccessStream,
+            RandomAccessStreamReference,
+        )
+        try:
+            from winrt.windows.media.interop import get_for_window as winrt_smtc_for_window
+        except Exception:
+            winrt_smtc_for_window = None
+        try:
+            from winrt.windows.media.playback import MediaPlayer as WinRtMediaPlayer
+        except Exception:
+            WinRtMediaPlayer = None
+        if winrt_smtc_for_window is not None or WinRtMediaPlayer is not None:
+            HAS_WINRT_SMTC = True
+    except Exception:
+        HAS_WINRT_SMTC = False
 
 
 def get_config_dir() -> Path:
@@ -121,9 +159,12 @@ def register_pc_appdata_registry(cfg_dir: Path, folders: list[str]):
         pass
 
 
-def detect_dx10_1_hardware() -> tuple[bool, str]:
+# ---------------------------------------------------------------------------
+# Hardware DirectX 10.1/10.0 & OpenGL 2.1/2.0 Capability Probes
+# ---------------------------------------------------------------------------
+def detect_dx_hardware() -> tuple[str, str]:
     if sys.platform != "win32":
-        return False, "Non-Windows Platform"
+        return "", "Non-Windows Platform"
     try:
         d3d11 = ctypes.windll.d3d11
         levels = (ctypes.c_uint * 2)(0xA100, 0xA000)
@@ -138,18 +179,94 @@ def detect_dx10_1_hardware() -> tuple[bool, str]:
             release_fn = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtable[2])
             release_fn(device)
             if actual_level.value >= 0xA100:
-                return True, "DirectX 10.1 Hardware Detected (FL 10_1)"
+                return "10.1", "DirectX 10.1 Hardware Detected (FL 10_1)"
             if actual_level.value >= 0xA000:
-                return False, "DirectX 10.0 Hardware Detected (FL 10_0)"
+                return "10.0", "DirectX 10.0 Hardware Detected (FL 10_0)"
     except Exception:
         pass
-    return False, "Hardware DX10.1 Not Detected"
+    return "", "DirectX 10.0+ Not Detected"
 
 
-HAS_DX10_1, DX_DETECT_LABEL = detect_dx10_1_hardware()
+def detect_opengl_hardware() -> tuple[tuple[int, int], str]:
+    if sys.platform != "win32":
+        return (2, 1), "OpenGL 2.1"
+    hwnd = None
+    hdc = None
+    hglrc = None
+    try:
+        user32 = ctypes.windll.user32
+        gdi32 = ctypes.windll.gdi32
+        opengl32 = ctypes.windll.opengl32
+
+        class PIXELFORMATDESCRIPTOR(ctypes.Structure):
+            _fields_ = [
+                ("nSize", ctypes.c_ushort), ("nVersion", ctypes.c_ushort), ("dwFlags", ctypes.c_uint),
+                ("iPixelType", ctypes.c_ubyte), ("cColorBits", ctypes.c_ubyte), ("cRedBits", ctypes.c_ubyte),
+                ("cRedShift", ctypes.c_ubyte), ("cGreenBits", ctypes.c_ubyte), ("cGreenShift", ctypes.c_ubyte),
+                ("cBlueBits", ctypes.c_ubyte), ("cBlueShift", ctypes.c_ubyte), ("cAlphaBits", ctypes.c_ubyte),
+                ("cAlphaShift", ctypes.c_ubyte), ("cAccumBits", ctypes.c_ubyte), ("cAccumRedBits", ctypes.c_ubyte),
+                ("cAccumGreenBits", ctypes.c_ubyte), ("cAccumBlueBits", ctypes.c_ubyte), ("cAccumAlphaBits", ctypes.c_ubyte),
+                ("cDepthBits", ctypes.c_ubyte), ("cStencilBits", ctypes.c_ubyte), ("cAuxBuffers", ctypes.c_ubyte),
+                ("iLayerType", ctypes.c_ubyte), ("bReserved", ctypes.c_ubyte), ("dwLayerMask", ctypes.c_uint),
+                ("dwVisibleMask", ctypes.c_uint), ("dwDamageMask", ctypes.c_uint),
+            ]
+
+        user32.CreateWindowExW.restype = ctypes.c_void_p
+        user32.GetDC.argtypes = [ctypes.c_void_p]
+        user32.GetDC.restype = ctypes.c_void_p
+        user32.ReleaseDC.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        user32.DestroyWindow.argtypes = [ctypes.c_void_p]
+        gdi32.ChoosePixelFormat.argtypes = [ctypes.c_void_p, ctypes.POINTER(PIXELFORMATDESCRIPTOR)]
+        gdi32.SetPixelFormat.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(PIXELFORMATDESCRIPTOR)]
+        opengl32.wglCreateContext.argtypes = [ctypes.c_void_p]
+        opengl32.wglCreateContext.restype = ctypes.c_void_p
+        opengl32.wglMakeCurrent.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        opengl32.wglDeleteContext.argtypes = [ctypes.c_void_p]
+        opengl32.glGetString.argtypes = [ctypes.c_uint]
+        opengl32.glGetString.restype = ctypes.c_char_p
+
+        hwnd = user32.CreateWindowExW(0, "STATIC", "NanoGLProbe", 0, 0, 0, 16, 16, None, None, None, None)
+        if hwnd:
+            hdc = user32.GetDC(hwnd)
+            pfd = PIXELFORMATDESCRIPTOR()
+            pfd.nSize = ctypes.sizeof(PIXELFORMATDESCRIPTOR)
+            pfd.nVersion = 1
+            pfd.dwFlags = 0x25  # PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER
+            pfd.cColorBits = 24
+            pf = gdi32.ChoosePixelFormat(hdc, ctypes.byref(pfd))
+            if pf and gdi32.SetPixelFormat(hdc, pf, ctypes.byref(pfd)):
+                hglrc = opengl32.wglCreateContext(hdc)
+                if hglrc and opengl32.wglMakeCurrent(hdc, hglrc):
+                    raw_ver = opengl32.glGetString(0x1F02)
+                    if raw_ver:
+                        ver_str = raw_ver.decode("ascii", errors="ignore").strip()
+                        m = re.match(r"(\d+)\.(\d+)", ver_str)
+                        if m:
+                            maj, min_v = int(m.group(1)), int(m.group(2))
+                            return (maj, min_v), f"OpenGL {maj}.{min_v} Detected ({ver_str})"
+    except Exception:
+        pass
+    finally:
+        try:
+            if hglrc:
+                ctypes.windll.opengl32.wglMakeCurrent(None, None)
+                ctypes.windll.opengl32.wglDeleteContext(hglrc)
+            if hdc and hwnd:
+                ctypes.windll.user32.ReleaseDC(hwnd, hdc)
+            if hwnd:
+                ctypes.windll.user32.DestroyWindow(hwnd)
+        except Exception:
+            pass
+    return (0, 0), "OpenGL 2.0+ Not Detected"
+
+
+DX_LEVEL, DX_DETECT_LABEL = detect_dx_hardware()
+GL_VER_TUPLE, GL_DETECT_LABEL = detect_opengl_hardware()
+GPU_INCOMPATIBLE_NEED_PROMPT = False
 
 
 def read_startup_graphics_backend() -> str:
+    global GPU_INCOMPATIBLE_NEED_PROMPT
     cfg_file = get_config_dir() / "config.json"
     if cfg_file.exists():
         try:
@@ -159,7 +276,12 @@ def read_startup_graphics_backend() -> str:
                 return val
         except Exception:
             pass
-    return "dx10_1" if HAS_DX10_1 else "software"
+    if DX_LEVEL in ("10.1", "10.0"):
+        return "dx10_1"
+    if GL_VER_TUPLE >= (2, 0):
+        return "opengl21"
+    GPU_INCOMPATIBLE_NEED_PROMPT = True
+    return "software"
 
 
 SELECTED_BACKEND = read_startup_graphics_backend()
@@ -180,7 +302,8 @@ if "--export-icon" not in sys.argv:
 
 from PySide6.QtCore import (
     Qt, QUrl, QTimer, QSize, Signal, QRect, QRectF, QPointF,
-    QBuffer, QCoreApplication, QIODevice, QVariantAnimation, QEasingCurve,
+    QBuffer, QCoreApplication, QIODevice, QObject, QEvent,
+    QVariantAnimation, QEasingCurve,
 )
 from PySide6.QtGui import (
     QAction, QColor, QCursor, QFont, QFontDatabase, QFontMetrics, QIcon, QImage,
@@ -198,7 +321,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtMultimedia import QAudioFormat, QAudioOutput, QAudioSink, QMediaDevices, QMediaPlayer
 
 # ---------------------------------------------------------------------------
-# App Metadata, Font Presets & 4L Tracklist
+# App Metadata, Built-In Windows Fonts & 4L Tracklist
 # ---------------------------------------------------------------------------
 APP_ID = "nanotune.player.1.0"
 AUDIO_EXTENSIONS = {".flac", ".mp3", ".wav", ".m4a", ".ogg", ".opus", ".aac"}
@@ -209,26 +332,21 @@ FOURL_ACCENT = "#1ED760"
 FOURL_ACCENT_2 = "#6BE0E4"
 
 FONT_PRESETS = [
-    ("SF Pro / Segoe UI (Default)", ["SF Pro Display", "Segoe UI"]),
-    ("SF Pro Bold (iOS Style)", ["SF Pro Display", "Segoe UI Semibold"]),
-    ("Apple Rounded (Soft Modern)", ["SF Pro Rounded", "Arial Rounded MT Bold", "Segoe UI"]),
-    ("Inter (Clean UI)", ["Inter", "Segoe UI"]),
-    ("Roboto (Android Material)", ["Roboto", "Segoe UI"]),
-    ("Roboto Medium (Android Bold)", ["Roboto Medium", "Segoe UI Semibold"]),
-    ("Google Sans / Product", ["Product Sans", "Google Sans", "Bahnschrift", "Segoe UI"]),
-    ("Helvetica Neue Style", ["Helvetica Neue", "Arial", "Segoe UI"]),
+    ("Georgia Editorial (Default)", ["Georgia"]),
+    ("Segoe UI (Clean Native)", ["Segoe UI"]),
+    ("Segoe UI Semibold", ["Segoe UI Semibold", "Segoe UI"]),
     ("Bahnschrift (Modern Geometric)", ["Bahnschrift"]),
-    ("Bahnschrift SemiBold", ["Bahnschrift SemiBold", "Bahnschrift"]),
-    ("Bahnschrift Condensed", ["Bahnschrift Condensed", "Bahnschrift"]),
-    ("Calibri Bold", ["Calibri"]),
-    ("Candara Smooth", ["Candara"]),
-    ("Corbel Clean", ["Corbel"]),
+    ("Calibri (Soft Sans)", ["Calibri"]),
+    ("Cambria (Classic Serif)", ["Cambria"]),
+    ("Candara (Humanist Sans)", ["Candara"]),
+    ("Century Gothic (Wide Geometric)", ["Century Gothic", "Bahnschrift"]),
+    ("Corbel (Clean Modern)", ["Corbel"]),
+    ("Franklin Gothic Medium", ["Franklin Gothic Medium", "Arial"]),
+    ("Lucida Sans Unicode", ["Lucida Sans Unicode"]),
+    ("Tahoma (Crisp UI)", ["Tahoma"]),
     ("Trebuchet MS", ["Trebuchet MS"]),
-    ("Verdana Wide", ["Verdana"]),
-    ("Tahoma Crisp", ["Tahoma"]),
-    ("Century Gothic Geometric", ["Century Gothic", "Bahnschrift"]),
-    ("Cascadia Mono (Tech)", ["Cascadia Mono", "Consolas"]),
-    ("Georgia Editorial", ["Georgia"]),
+    ("Verdana (Wide Legible)", ["Verdana"]),
+    ("Consolas (Monospace Tech)", ["Consolas"]),
 ]
 
 OFFICIAL_4L_TRACKS = [
@@ -321,7 +439,7 @@ def album_cache_key(album_name: str, folder_path: str) -> str:
 
 
 def enable_windows_dark_titlebar(hwnd: int):
-    if sys.platform != "win32":
+    if sys.platform != "win32" or IS_LEGACY_WIN:
         return
     try:
         dwmapi = ctypes.windll.dwmapi
@@ -339,10 +457,14 @@ def enable_windows_dark_titlebar(hwnd: int):
 
 def describe_graphics_backend(mode: str) -> str:
     if mode == "dx10_1":
+        if DX_LEVEL == "10.0":
+            return f"DirectX 10.0 Fallback Active  •  {DX_DETECT_LABEL}"
         return f"DirectX 10.1 Active  •  {DX_DETECT_LABEL}"
     if mode == "opengl21":
-        return f"OpenGL 2.1 Active  •  {DX_DETECT_LABEL}"
-    return f"Software Rasterizer Active  •  {DX_DETECT_LABEL}"
+        if GL_VER_TUPLE == (2, 0):
+            return f"OpenGL 2.0 Fallback Active  •  {GL_DETECT_LABEL}"
+        return f"OpenGL 2.1 Active  •  {GL_DETECT_LABEL}"
+    return f"Software Rasterizer Active  •  {DX_DETECT_LABEL}  •  {GL_DETECT_LABEL}"
 
 
 # ---------------------------------------------------------------------------
@@ -536,8 +658,15 @@ def make_vector_icon(name: str, color: str = "#FFFFFF", size: int = 24) -> QIcon
         for rx, ry in ((0.18, 0.18), (0.54, 0.18), (0.18, 0.54), (0.54, 0.54)):
             p.drawRoundedRect(QRectF(s * rx, s * ry, s * 0.28, s * 0.28), 2.5, 2.5)
     elif name == "settings":
-        p.drawEllipse(QPointF(s * 0.50, s * 0.50), s * 0.14, s * 0.14)
-        p.drawEllipse(QPointF(s * 0.50, s * 0.50), s * 0.30, s * 0.30)
+        cx = cy = s * 0.50
+        p.drawEllipse(QPointF(cx, cy), s * 0.125, s * 0.125)
+        p.drawEllipse(QPointF(cx, cy), s * 0.265, s * 0.265)
+        for i in range(8):
+            ang = i * (math.pi / 4.0)
+            p.drawLine(
+                QPointF(cx + s * 0.285 * math.cos(ang), cy + s * 0.285 * math.sin(ang)),
+                QPointF(cx + s * 0.395 * math.cos(ang), cy + s * 0.395 * math.sin(ang)),
+            )
     elif name == "info":
         p.drawEllipse(QPointF(s * 0.50, s * 0.50), s * 0.32, s * 0.32)
         p.drawLine(QPointF(s * 0.50, s * 0.45), QPointF(s * 0.50, s * 0.66))
@@ -601,6 +730,7 @@ def extract_metadata(file_path: Path) -> dict:
     artist = "Unknown Artist"
     album_artist = ""
     album = ""
+    year_str = ""
     track_no = 0
     duration_ms = 0
     sample_rate = 0
@@ -631,6 +761,13 @@ def extract_metadata(file_path: Path) -> dict:
                 m = re.match(r"(\d+)", str(raw_tn))
                 if m:
                     track_no = int(m.group(1))
+                for dk in ("date", "year", "originaldate"):
+                    raw_d = (audio.tags.get(dk) or [""])[0]
+                    if raw_d:
+                        ym = re.search(r"\b(19\d{2}|20\d{2})\b", str(raw_d))
+                        if ym:
+                            year_str = ym.group(1)
+                            break
             if hasattr(audio, "info") and audio.info:
                 info = audio.info
                 duration_ms = int((getattr(info, "length", 0) or 0) * 1000)
@@ -663,6 +800,7 @@ def extract_metadata(file_path: Path) -> dict:
         "artist": clean_artist_str(str(artist)),
         "album_artist": clean_artist_str(str(album_artist)) if album_artist else "",
         "album": str(album) or file_path.parent.name,
+        "year": year_str,
         "track_no": track_no,
         "duration_ms": duration_ms,
         "sample_rate": sample_rate,
@@ -684,6 +822,13 @@ def resolve_album_artist(album_tracks: list[dict]) -> str:
     if primaries:
         return Counter(primaries).most_common(1)[0][0]
     return "Unknown Artist"
+
+
+def resolve_album_year(album_tracks: list[dict]) -> str:
+    years = [t.get("year", "") for t in album_tracks if t.get("year")]
+    if years:
+        return Counter(years).most_common(1)[0][0]
+    return ""
 
 
 def match_4l_track(meta: dict, fourl_only: bool = False) -> tuple[bool, int, str, bool]:
@@ -840,16 +985,20 @@ class CoverPreloader(threading.Thread):
                     self.callback(key, q220, q64)
             except Exception:
                 pass
-            time.sleep(0.012)
+            time.sleep(0.010)
 
 
+# ---------------------------------------------------------------------------
+# Lyrics Engine: .ELRC (Word-by-Word), .LRC & Embedded Tags
+# ---------------------------------------------------------------------------
 def find_lrc_path(audio_path: Path) -> Path | None:
-    direct = audio_path.with_suffix(".lrc")
-    if direct.exists():
-        return direct
-    sub = audio_path.parent / "lyrics" / f"{audio_path.stem}.lrc"
-    if sub.exists():
-        return sub
+    for ext in (".elrc", ".lrc"):
+        direct = audio_path.with_suffix(ext)
+        if direct.exists():
+            return direct
+        sub = audio_path.parent / "lyrics" / f"{audio_path.stem}{ext}"
+        if sub.exists():
+            return sub
     return None
 
 
@@ -858,11 +1007,12 @@ def read_lyrics_for_track(audio_path_str: str) -> tuple[str, str]:
 
     lrc_file = find_lrc_path(audio_path)
     if lrc_file is not None:
+        tag_lbl = ".ELRC" if lrc_file.suffix.lower() == ".elrc" else ".LRC"
         for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
             try:
                 text = lrc_file.read_text(encoding=enc).strip()
                 if text:
-                    return text, f".LRC ({lrc_file.name})"
+                    return text, f"{tag_lbl} ({lrc_file.name})"
             except Exception:
                 continue
 
@@ -905,51 +1055,113 @@ def read_lyrics_for_track(audio_path_str: str) -> tuple[str, str]:
 
 
 LRC_LINE_RE = re.compile(r"\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]")
+ELRC_WORD_RE = re.compile(r"<(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?>")
+VOICE_PREFIX_RE = re.compile(r"^\s*v\d+\s*:\s*", re.I)
 
 
-def parse_lyrics(raw_text: str) -> tuple[bool, list[tuple[int, str]]]:
+def _ts_to_ms(mins: str, secs: str, frac: str | None) -> int:
+    frac_s = frac or "0"
+    ms_part = int(frac_s.ljust(3, "0")[:3])
+    return (int(mins) * 60 + int(secs)) * 1000 + ms_part
+
+
+def _parse_elrc_words(body: str, fallback_start_ms: int) -> tuple[list[dict], str, int]:
+    """Parse inline <mm:ss.xxx> tags into word segments with clean start_ms/end_ms."""
+    body_clean = VOICE_PREFIX_RE.sub("", body).strip()
+    matches = list(ELRC_WORD_RE.finditer(body_clean))
+    if not matches:
+        return [], body_clean, fallback_start_ms
+
+    words: list[dict] = []
+    first_ts = _ts_to_ms(matches[0].group(1), matches[0].group(2), matches[0].group(3))
+    line_start = fallback_start_ms if fallback_start_ms >= 0 else first_ts
+
+    if matches[0].start() > 0:
+        lead_txt = VOICE_PREFIX_RE.sub("", body_clean[: matches[0].start()])
+        if lead_txt.strip():
+            words.append({"text": lead_txt, "start_ms": line_start, "end_ms": first_ts})
+
+    for idx, m in enumerate(matches):
+        t_ms = _ts_to_ms(m.group(1), m.group(2), m.group(3))
+        seg_start = m.end()
+        seg_end = matches[idx + 1].start() if idx + 1 < len(matches) else len(body_clean)
+        seg_txt = body_clean[seg_start:seg_end]
+
+        if not seg_txt.strip():
+            if words and words[-1]["end_ms"] is None:
+                words[-1]["end_ms"] = t_ms
+            continue
+
+        if words and words[-1]["end_ms"] is None:
+            words[-1]["end_ms"] = t_ms
+        words.append({"text": seg_txt, "start_ms": t_ms, "end_ms": None})
+
+    plain_joined = "".join(w["text"] for w in words).strip() or "♪"
+    return words, plain_joined, (line_start if fallback_start_ms >= 0 else first_ts)
+
+
+def parse_lrc_text(raw_text: str) -> tuple[bool, list[dict]]:
+    """
+    Parse .ELRC / .LRC / plain lyrics.
+    Returns (is_synced, [{"time_ms": int, "text": str, "words": list[dict]}, ...]).
+    """
     if not raw_text.strip():
         return False, []
 
-    synced_entries: list[tuple[int, str]] = []
-    plain_lines: list[tuple[int, str]] = []
+    synced_entries: list[dict] = []
+    plain_entries: list[dict] = []
 
-    for line in raw_text.splitlines():
-        matches = list(LRC_LINE_RE.finditer(line))
-        if matches:
-            lyric_body = LRC_LINE_RE.sub("", line).strip()
-            for m in matches:
-                mins = int(m.group(1))
-                secs = int(m.group(2))
-                frac = m.group(3) or "0"
-                ms_part = int(frac.ljust(3, "0")[:3])
-                total_ms = (mins * 60 + secs) * 1000 + ms_part
-                synced_entries.append((total_ms, lyric_body or "♪"))
+    for raw_line in raw_text.splitlines():
+        line = raw_line.strip()
+        if re.match(r"^\[(ar|ti|al|by|offset|length|re|ve):.*\]$", line, re.I):
+            continue
+
+        line_matches = list(LRC_LINE_RE.finditer(raw_line))
+        has_word_tags = bool(ELRC_WORD_RE.search(raw_line))
+
+        if line_matches:
+            lyric_body = LRC_LINE_RE.sub("", raw_line).strip()
+            for m in line_matches:
+                t_ms = _ts_to_ms(m.group(1), m.group(2), m.group(3))
+                words, clean_txt, _ = _parse_elrc_words(lyric_body, t_ms)
+                synced_entries.append({"time_ms": t_ms, "text": clean_txt or "♪", "words": words})
+        elif has_word_tags:
+            words, clean_txt, inferred_ms = _parse_elrc_words(raw_line, -1)
+            if words:
+                synced_entries.append({"time_ms": inferred_ms, "text": clean_txt or "♪", "words": words})
         else:
-            if re.match(r"^\[(ar|ti|al|by|offset|length|re|ve):.*\]$", line.strip(), re.I):
-                continue
-            plain_lines.append((-1, line))
+            plain_clean = VOICE_PREFIX_RE.sub("", raw_line)
+            plain_entries.append({"time_ms": -1, "text": plain_clean, "words": []})
 
     if synced_entries:
-        synced_entries.sort(key=lambda x: x[0])
+        synced_entries.sort(key=lambda x: x["time_ms"])
+        for i, entry in enumerate(synced_entries):
+            words = entry["words"]
+            if not words:
+                continue
+            next_line_ms = synced_entries[i + 1]["time_ms"] if i + 1 < len(synced_entries) else (words[-1]["start_ms"] + 1200)
+            for j, w in enumerate(words):
+                if w["end_ms"] is None:
+                    w["end_ms"] = words[j + 1]["start_ms"] if j + 1 < len(words) else max(w["start_ms"] + 250, next_line_ms)
+                w["end_ms"] = max(w["start_ms"] + 40, w["end_ms"])
         return True, synced_entries
 
-    return False, plain_lines
-
-
+    return False, plain_entries
 # ---------------------------------------------------------------------------
-# Crackle-Free Real-Time Audio FX Engine
+# Crackle-Free Real-Time Audio FX Engine (Threaded Pre-Buffer + Lo-Fi + Bass + Reverb)
 # ---------------------------------------------------------------------------
 class FXStreamDevice(QIODevice):
     BLOCK = 2048
     N_FFT = 4096
     SAMPLE_RATE = 44100
+    TARGET_BUF_BYTES = 163840  # ~230 ms pre-buffered off the GUI thread
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._lock = threading.Lock()
+        self._cond = threading.Condition()
         self.pcm = None
         self.cursor_frame: float = 0.0
+        self._cursor_played_frames: float = 0.0
         self.ended: bool = False
 
         self.speed: float = 1.0
@@ -957,13 +1169,25 @@ class FXStreamDevice(QIODevice):
         self.link_pitch: bool = True
         self.bass_boost: float = 0.0
         self.reverb_mix: float = 0.0
+        self.lofi_enabled: bool = False
 
         self._s_speed: float = 1.0
         self._s_pitch: float = 0.0
+        self._s_bass: float = 0.0
+        self._s_reverb: float = 0.0
+        self._s_lofi: float = 0.0
         self._prev_step: float = 1.0
+        self._prev_link_pitch: bool = True
         self._grain_tail = np.zeros((self.BLOCK // 2, 2), dtype=np.float32) if HAS_FX_DSP else None
+        self._prev_dry_tail = np.zeros((64, 2), dtype=np.float32) if HAS_FX_DSP else None
 
-        self._out_fifo = np.zeros((0, 2), dtype=np.float32) if HAS_FX_DSP else None
+        self._seek_fade_len: int = 512
+        self._seek_fade_pos: int = 512
+
+        self._pcm_bytes_buf = bytearray()
+        self._producer_stop: bool = True
+        self._producer_thread: threading.Thread | None = None
+
         self._dry_ola_buf = np.zeros((self.BLOCK, 2), dtype=np.float32) if HAS_FX_DSP else None
         self._wet_ola_buf = np.zeros((self.BLOCK, 2), dtype=np.float32) if HAS_FX_DSP else None
         self._ir_parts = None
@@ -971,13 +1195,17 @@ class FXStreamDevice(QIODevice):
         self._fdl_idx = 0
         self._lp_fft = None
 
+        self._lofi_coeffs = (1.0, 0.0, 0.0, 0.0, 0.0)
+        self._lofi_z1 = np.zeros(2, dtype=np.float32) if HAS_FX_DSP else None
+        self._lofi_z2 = np.zeros(2, dtype=np.float32) if HAS_FX_DSP else None
+
         if HAS_FX_DSP:
             self._init_dsp_tables()
 
     def _init_dsp_tables(self):
         taps = 255
         n = np.arange(taps, dtype=np.float32)
-        fc = 115.0 / self.SAMPLE_RATE
+        fc = 155.0 / self.SAMPLE_RATE
         h_lp = 2.0 * fc * np.sinc(2.0 * fc * (n - (taps - 1) / 2.0)) * np.hamming(taps).astype(np.float32)
         h_lp /= np.sum(h_lp)
         lp_pad = np.zeros((self.N_FFT, 2), dtype=np.float32)
@@ -1006,44 +1234,106 @@ class FXStreamDevice(QIODevice):
         self._fdl = np.zeros((n_parts, self.N_FFT // 2 + 1, 2), dtype=np.complex64)
         self._fdl_idx = 0
 
+        w0 = 2.0 * math.pi * 1400.0 / float(self.SAMPLE_RATE)
+        cos_w0 = math.cos(w0)
+        alpha = math.sin(w0) / (2.0 * 0.7071)
+        a0 = 1.0 + alpha
+        b0 = ((1.0 - cos_w0) * 0.5) / a0
+        b1 = (1.0 - cos_w0) / a0
+        b2 = b0
+        a1 = (-2.0 * cos_w0) / a0
+        a2 = (1.0 - alpha) / a0
+        self._lofi_coeffs = (b0, b1, b2, a1, a2)
+
+    def open(self, mode):
+        ok = super().open(mode)
+        if ok and HAS_FX_DSP:
+            with self._cond:
+                self._producer_stop = False
+            self._producer_thread = threading.Thread(target=self._producer_loop, daemon=True)
+            self._producer_thread.start()
+        return ok
+
+    def close(self):
+        with self._cond:
+            self._producer_stop = True
+            self._cond.notify_all()
+        if self._producer_thread is not None and self._producer_thread.is_alive():
+            self._producer_thread.join(timeout=0.35)
+        self._producer_thread = None
+        super().close()
+
+    def _producer_loop(self):
+        while True:
+            with self._cond:
+                if self._producer_stop:
+                    return
+                if self.pcm is None or self.ended or len(self._pcm_bytes_buf) >= self.TARGET_BUF_BYTES:
+                    self._cond.wait(timeout=0.020)
+                    continue
+                blk = self._process_next_block()
+                self._pcm_bytes_buf.extend(np.ascontiguousarray(blk, dtype=np.float32).tobytes())
+                self._cond.notify_all()
+
     def set_pcm(self, pcm_array, start_ms: int = 0):
-        with self._lock:
+        with self._cond:
             self.pcm = pcm_array
             self.cursor_frame = max(0.0, (start_ms / 1000.0) * self.SAMPLE_RATE)
+            self._cursor_played_frames = self.cursor_frame
             self.ended = False
             self._s_speed = self.speed
             self._s_pitch = self.pitch_semitones
+            self._s_bass = self.bass_boost
+            self._s_reverb = self.reverb_mix
+            self._s_lofi = 1.0 if self.lofi_enabled else 0.0
             self._prev_step = self.speed * (2.0 ** (self.pitch_semitones / 12.0))
+            self._prev_link_pitch = self.link_pitch
             self._reset_buffers()
+            self._seek_fade_pos = 0
+            self._cond.notify_all()
 
     def seek_ms(self, ms: int):
-        with self._lock:
+        with self._cond:
             if self.pcm is not None:
                 self.cursor_frame = max(0.0, min(float(len(self.pcm)), (ms / 1000.0) * self.SAMPLE_RATE))
+                self._cursor_played_frames = self.cursor_frame
                 self.ended = False
+                self._s_lofi = 1.0 if self.lofi_enabled else 0.0
+                self._s_bass = self.bass_boost
+                self._s_reverb = self.reverb_mix
                 self._reset_buffers()
+                self._seek_fade_pos = 0
+                self._cond.notify_all()
 
     def _reset_buffers(self):
+        self._pcm_bytes_buf.clear()
         if HAS_FX_DSP:
-            self._out_fifo = np.zeros((0, 2), dtype=np.float32)
             self._dry_ola_buf.fill(0)
             self._wet_ola_buf.fill(0)
             self._grain_tail.fill(0)
+            self._prev_dry_tail.fill(0)
+            self._lofi_z1.fill(0)
+            self._lofi_z2.fill(0)
             if self._fdl is not None:
                 self._fdl.fill(0)
             self._fdl_idx = 0
 
-    def update_params(self, speed: float, pitch_st: float, link_pitch: bool, bass: float, reverb: float):
-        with self._lock:
+    def update_params(self, speed: float, pitch_st: float, link_pitch: bool, bass: float, reverb: float, lofi: bool):
+        with self._cond:
             self.speed = speed
             self.pitch_semitones = pitch_st
             self.link_pitch = link_pitch
             self.bass_boost = bass
             self.reverb_mix = reverb
+            self.lofi_enabled = lofi
 
     def get_position_ms(self) -> int:
-        with self._lock:
-            return int((self.cursor_frame / self.SAMPLE_RATE) * 1000.0)
+        with self._cond:
+            return int((self._cursor_played_frames / self.SAMPLE_RATE) * 1000.0)
+
+    def is_finished(self) -> bool:
+        with self._cond:
+            return self.ended and len(self._pcm_bytes_buf) == 0
 
     def bytesAvailable(self) -> int:
         return 32768 + super().bytesAvailable()
@@ -1066,9 +1356,14 @@ class FXStreamDevice(QIODevice):
             self.ended = True
             return np.zeros((self.BLOCK, 2), dtype=np.float32)
 
-        self._s_speed += (self.speed - self._s_speed) * 0.42
-        self._s_pitch += (self.pitch_semitones - self._s_pitch) * 0.42
+        self._s_speed += (self.speed - self._s_speed) * 0.35
+        self._s_pitch += (self.pitch_semitones - self._s_pitch) * 0.35
+        self._s_bass += (self.bass_boost - self._s_bass) * 0.35
+        self._s_reverb += (self.reverb_mix - self._s_reverb) * 0.35
+
         pitch_factor = 2.0 ** (self._s_pitch / 12.0)
+        link_switched = self.link_pitch != self._prev_link_pitch
+        self._prev_link_pitch = self.link_pitch
 
         if self.link_pitch or (abs(pitch_factor - 1.0) < 0.01 and abs(self._s_speed - 1.0) < 0.01):
             next_step = max(0.45, min(1.85, self._s_speed * pitch_factor))
@@ -1077,6 +1372,8 @@ class FXStreamDevice(QIODevice):
             self.cursor_frame += float(np.sum(steps))
             self._prev_step = next_step
             dry = self._sample_interp(idx, total)
+            if link_switched:
+                self._grain_tail.fill(0)
         else:
             half = self.BLOCK // 2
             win = np.hanning(self.BLOCK).astype(np.float32)[:, None]
@@ -1085,6 +1382,8 @@ class FXStreamDevice(QIODevice):
 
             g0_idx = self.cursor_frame + np.arange(self.BLOCK, dtype=np.float64) * pitch_factor
             g0 = self._sample_interp(g0_idx, total) * win
+            if link_switched:
+                self._grain_tail = g0[:half].copy()
             dry[:half] = self._grain_tail + g0[:half]
 
             g1_idx = (self.cursor_frame + hop_in) + np.arange(self.BLOCK, dtype=np.float64) * pitch_factor
@@ -1095,67 +1394,117 @@ class FXStreamDevice(QIODevice):
             self.cursor_frame += hop_in * 2.0
             self._prev_step = self._s_speed * pitch_factor
 
-        if self.bass_boost <= 0.005 and self.reverb_mix <= 0.005:
-            return dry.astype(np.float32)
+        if link_switched:
+            cf = np.linspace(0.0, 1.0, 64, dtype=np.float32)[:, None]
+            dry[:64] = self._prev_dry_tail * (1.0 - cf) + dry[:64] * cf
 
-        padded = np.zeros((self.N_FFT, 2), dtype=np.float32)
-        padded[: self.BLOCK] = dry
-        X = np.fft.rfft(padded, axis=0)
+        if self._seek_fade_pos < self._seek_fade_len:
+            n_apply = min(self.BLOCK, self._seek_fade_len - self._seek_fade_pos)
+            idx_f = np.arange(self._seek_fade_pos, self._seek_fade_pos + n_apply, dtype=np.float32)
+            ramp = (0.5 * (1.0 - np.cos(math.pi * (idx_f / float(self._seek_fade_len)))))[:, None]
+            dry[:n_apply] *= ramp
+            self._seek_fade_pos += n_apply
 
-        if self.bass_boost > 0.005:
-            extra_low = self.bass_boost * 0.68
-            headroom = 1.0 - 0.14 * self.bass_boost
-            X_eq = X * headroom * (1.0 + extra_low * self._lp_fft)
-            eq_full = np.fft.irfft(X_eq, n=self.N_FFT, axis=0).astype(np.float32)
-            dry_out = eq_full[: self.BLOCK] + self._dry_ola_buf
-            self._dry_ola_buf = eq_full[self.BLOCK :].copy()
+        self._prev_dry_tail = dry[-64:].copy()
+
+        if self._s_bass > 0.004 or self._s_reverb > 0.004:
+            padded = np.zeros((self.N_FFT, 2), dtype=np.float32)
+            padded[: self.BLOCK] = dry
+            X = np.fft.rfft(padded, axis=0)
+
+            if self._s_bass > 0.004:
+                extra_low = self._s_bass * 3.1
+                headroom = 1.0 - 0.16 * self._s_bass
+                X_eq = X * headroom * (1.0 + extra_low * self._lp_fft)
+                eq_full = np.fft.irfft(X_eq, n=self.N_FFT, axis=0).astype(np.float32)
+                dry_out = eq_full[: self.BLOCK] + self._dry_ola_buf
+                self._dry_ola_buf = eq_full[self.BLOCK :].copy()
+            else:
+                X_eq = X
+                dry_out = dry
+                self._dry_ola_buf.fill(0)
+
+            if self._s_reverb > 0.004 and self._ir_parts is not None:
+                n_parts = len(self._ir_parts)
+                self._fdl[self._fdl_idx] = X_eq
+                conv_spec = np.zeros_like(X_eq)
+                for k in range(n_parts):
+                    p_idx = (self._fdl_idx - k) % n_parts
+                    conv_spec += self._fdl[p_idx] * self._ir_parts[k]
+                self._fdl_idx = (self._fdl_idx + 1) % n_parts
+
+                wet_full = np.fft.irfft(conv_spec, n=self.N_FFT, axis=0).astype(np.float32)
+                wet = wet_full[: self.BLOCK] + self._wet_ola_buf
+                self._wet_ola_buf = wet_full[self.BLOCK :].copy()
+
+                out = dry_out * (1.0 - 0.22 * self._s_reverb) + wet * (self._s_reverb * 1.10)
+            else:
+                self._wet_ola_buf.fill(0)
+                out = dry_out
+
+            out = np.tanh(out * 0.86) / 0.86
         else:
-            X_eq = X
-            dry_out = dry
             self._dry_ola_buf.fill(0)
-
-        if self.reverb_mix > 0.005 and self._ir_parts is not None:
-            n_parts = len(self._ir_parts)
-            self._fdl[self._fdl_idx] = X_eq
-            conv_spec = np.zeros_like(X_eq)
-            for k in range(n_parts):
-                p_idx = (self._fdl_idx - k) % n_parts
-                conv_spec += self._fdl[p_idx] * self._ir_parts[k]
-            self._fdl_idx = (self._fdl_idx + 1) % n_parts
-
-            wet_full = np.fft.irfft(conv_spec, n=self.N_FFT, axis=0).astype(np.float32)
-            wet = wet_full[: self.BLOCK] + self._wet_ola_buf
-            self._wet_ola_buf = wet_full[self.BLOCK :].copy()
-
-            out = dry_out * (1.0 - 0.22 * self.reverb_mix) + wet * (self.reverb_mix * 1.10)
-        else:
             self._wet_ola_buf.fill(0)
-            out = dry_out
+            out = dry.astype(np.float32)
 
-        out = np.tanh(out * 0.86) / 0.86
+        target_lofi = 1.0 if self.lofi_enabled else 0.0
+        if self._s_lofi > 0.002 or target_lofi > 0.0:
+            prev_lofi = self._s_lofi
+            self._s_lofi += (target_lofi - self._s_lofi) * 0.35
+            l_in = out[:, 0].tolist()
+            r_in = out[:, 1].tolist()
+            b0, b1, b2, a1, a2 = self._lofi_coeffs
+            z1_l, z2_l = float(self._lofi_z1[0]), float(self._lofi_z2[0])
+            z1_r, z2_r = float(self._lofi_z1[1]), float(self._lofi_z2[1])
+            n_samp = len(l_in)
+            l_out = [0.0] * n_samp
+            r_out = [0.0] * n_samp
+            for idx_s in range(n_samp):
+                xl = l_in[idx_s]
+                yl = b0 * xl + z1_l
+                z1_l = b1 * xl - a1 * yl + z2_l
+                z2_l = b2 * xl - a2 * yl
+                l_out[idx_s] = yl
+
+                xr = r_in[idx_s]
+                yr = b0 * xr + z1_r
+                z1_r = b1 * xr - a1 * yr + z2_r
+                z2_r = b2 * xr - a2 * yr
+                r_out[idx_s] = yr
+            self._lofi_z1[0], self._lofi_z2[0] = z1_l, z2_l
+            self._lofi_z1[1], self._lofi_z2[1] = z1_r, z2_r
+            lofi_arr = np.column_stack((np.array(l_out, dtype=np.float32), np.array(r_out, dtype=np.float32)))
+            ramp = np.linspace(prev_lofi, self._s_lofi, n_samp, dtype=np.float32)[:, None]
+            out = out * (1.0 - ramp) + lofi_arr * ramp
+        else:
+            self._lofi_z1.fill(0)
+            self._lofi_z2.fill(0)
+
         return out.astype(np.float32)
 
     def readData(self, maxlen: int) -> bytes:
         if not HAS_FX_DSP or maxlen <= 0:
             return b"\x00" * max(0, maxlen)
 
-        frames_needed = max(1, maxlen // 8)
-        with self._lock:
-            while len(self._out_fifo) < frames_needed:
+        take_bytes = maxlen - (maxlen % 8)
+        if take_bytes <= 0:
+            return b""
+
+        with self._cond:
+            while len(self._pcm_bytes_buf) < take_bytes and not self.ended and self.pcm is not None:
                 blk = self._process_next_block()
-                self._out_fifo = np.concatenate((self._out_fifo, blk), axis=0)
-                if self.ended:
-                    break
+                self._pcm_bytes_buf.extend(np.ascontiguousarray(blk, dtype=np.float32).tobytes())
+            n_avail = min(take_bytes, len(self._pcm_bytes_buf))
+            out = bytes(self._pcm_bytes_buf[:n_avail])
+            if n_avail > 0:
+                del self._pcm_bytes_buf[:n_avail]
+                self._cursor_played_frames += (n_avail // 8) * self._s_speed
+                self._cond.notify_all()
 
-            take = min(frames_needed, len(self._out_fifo))
-            chunk = self._out_fifo[:take]
-            self._out_fifo = self._out_fifo[take:]
-
-        if len(chunk) < frames_needed:
-            pad = np.zeros((frames_needed - len(chunk), 2), dtype=np.float32)
-            chunk = np.concatenate((chunk, pad), axis=0)
-
-        return np.ascontiguousarray(chunk, dtype=np.float32).tobytes()
+        if len(out) < take_bytes:
+            out += b"\x00" * (take_bytes - len(out))
+        return out
 
     def writeData(self, data: bytes) -> int:
         return 0
@@ -1195,8 +1544,119 @@ class DecodeWorker(threading.Thread):
 
 
 # ---------------------------------------------------------------------------
-# Custom Widgets
+# Event Filters & Custom Widgets
 # ---------------------------------------------------------------------------
+class NoWheelEventFilter(QObject):
+    """Prevents mouse wheel from accidentally changing sliders/combos and forwards scroll up."""
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Wheel:
+            event.ignore()
+            p = obj.parentWidget()
+            while p is not None:
+                QApplication.sendEvent(p, event)
+                if event.isAccepted():
+                    break
+                p = p.parentWidget()
+            return True
+        return super().eventFilter(obj, event)
+
+
+class GlobalSpacePlayPauseFilter(QObject):
+    """Locks Spacebar to Play/Pause globally unless typing in a text input field."""
+
+    def __init__(self, main_win):
+        super().__init__(main_win)
+        self.main_win = main_win
+
+    def eventFilter(self, obj, event):
+        etype = event.type()
+        if etype == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
+            fw = QApplication.focusWidget()
+            if isinstance(fw, QLineEdit):
+                fw.clearFocus()
+                self.main_win.setFocus(Qt.FocusReason.OtherFocusReason)
+                event.accept()
+                return True
+
+        if etype in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease, QEvent.Type.ShortcutOverride):
+            if event.key() == Qt.Key.Key_Space and not (
+                event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier)
+            ):
+                fw = QApplication.focusWidget()
+                if isinstance(fw, (QLineEdit, QTextEdit)):
+                    return False
+                if etype == QEvent.Type.KeyPress and not event.isAutoRepeat():
+                    self.main_win.toggle_play_pause()
+                event.accept()
+                return True
+        return super().eventFilter(obj, event)
+
+
+class GpuCompatibilityDialog(QDialog):
+    """Shown before launch if GPU supports neither DirectX 10.0+ nor OpenGL 2.0+."""
+
+    def __init__(self, icon: QIcon):
+        super().__init__()
+        self.setWindowTitle("NanoTune — Graphics Compatibility")
+        self.setWindowIcon(icon)
+        self.setFixedSize(520, 320)
+        self.setModal(True)
+
+        self.setStyleSheet("""
+            QDialog { background-color: #0D1112; color: #EAF0EE; border: 1px solid #2A3236; }
+            QLabel { color: #EAF0EE; }
+            QPushButton#primaryBtn {
+                background-color: #FFD83D; color: #121006; border: none;
+                border-radius: 15px; padding: 10px 20px; font-size: 13px; font-weight: 800;
+            }
+            QPushButton#primaryBtn:hover { background-color: #FFE46E; }
+            QPushButton#ghostBtn {
+                background-color: #171E20; color: #97A6A4; border: 1px solid #2A3638;
+                border-radius: 15px; padding: 10px 18px; font-size: 13px;
+            }
+            QPushButton#ghostBtn:hover { color: #FFFFFF; border-color: #FFD83D; }
+        """)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(28, 24, 28, 24)
+        lay.setSpacing(12)
+
+        hdr = QLabel("Legacy Graphics Detected")
+        hdr.setStyleSheet("color: #FFD83D; font-size: 20px; font-weight: 800;")
+        lay.addWidget(hdr)
+
+        info = QLabel(
+            f"Hardware acceleration in NanoTune requires DirectX 10.0+ or OpenGL 2.0+.\n\n"
+            f"Detected on this PC:\n"
+            f"• {DX_DETECT_LABEL}\n"
+            f"• {GL_DETECT_LABEL}\n\n"
+            "You can continue cleanly using Native CPU Software Rendering."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #D2DFDD; font-size: 13px;")
+        lay.addWidget(info)
+        lay.addStretch()
+
+        btns = QHBoxLayout()
+        exit_btn = QPushButton("Exit")
+        exit_btn.setObjectName("ghostBtn")
+        exit_btn.clicked.connect(self.reject)
+
+        cont_btn = QPushButton("Continue with Software Rendering")
+        cont_btn.setObjectName("primaryBtn")
+        cont_btn.clicked.connect(self.accept)
+
+        btns.addWidget(exit_btn)
+        btns.addStretch()
+        btns.addWidget(cont_btn)
+        lay.addLayout(btns)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        enable_windows_dark_titlebar(int(self.winId()))
+
+
 class RoundedCoverWidget(QWidget):
     def __init__(self, radius: int = 12, border_width: float = 2.0, parent=None):
         super().__init__(parent)
@@ -1251,6 +1711,8 @@ class RoundedCoverWidget(QWidget):
 
 
 class SeekSlider(QSlider):
+    """Exact 1:1 pixel click-and-drag horizontal slider."""
+
     def _value_from_x(self, x_pos: float) -> int:
         opt = QStyleOptionSlider()
         self.initStyleOption(opt)
@@ -1440,17 +1902,23 @@ class AlbumCardWidget(QFrame):
 
 
 class AnimatedLyricsWidget(QWidget):
+    """Frame-rate adaptive (60/120/144/165 Hz) lyrics & .elrc word-by-word karaoke renderer."""
+
     lineClicked = Signal(int)
 
-    def __init__(self, parent=None):
+    def __init__(self, refresh_hz: float = 60.0, parent=None):
         super().__init__(parent)
         self.setMouseTracking(True)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self._backdrop_fn = None
+
         self.lines: list[dict] = []
         self.is_synced: bool = False
+        self.has_elrc_words: bool = False
         self.active_idx: int = -1
         self.hover_idx: int = -1
         self.font_size: int = 19
-        self.font_family: str = "Segoe UI"
+        self.font_family: str = "Georgia"
         self.accent_color = QColor(STAR_DEFAULT_YELLOW)
 
         self.scroll_y: float = 0.0
@@ -1458,10 +1926,25 @@ class AnimatedLyricsWidget(QWidget):
         self.max_scroll_y: float = 0.0
         self.manual_browse_until: float = 0.0
 
+        self._is_playing: bool = False
+        self._clock_speed: float = 1.0
+        self._clock_anchor_ms: float = 0.0
+        self._clock_anchor_mono: float = time.monotonic()
+        self._smooth_pos_ms: int = 0
+        self._last_tick_mono: float = time.monotonic()
+
         self._cached_width: int = -1
         self._anim_timer = QTimer(self)
-        self._anim_timer.setInterval(16)
+        self.set_refresh_rate(refresh_hz)
         self._anim_timer.timeout.connect(self._tick_animation)
+
+    def set_backdrop_fn(self, fn):
+        self._backdrop_fn = fn
+
+    def set_refresh_rate(self, hz: float):
+        clamped = max(50.0, min(240.0, float(hz or 60.0)))
+        interval_ms = max(4, int(round(1000.0 / clamped)))
+        self._anim_timer.setInterval(interval_ms)
 
     def set_font_family(self, family: str):
         self.font_family = family
@@ -1479,18 +1962,47 @@ class AnimatedLyricsWidget(QWidget):
         self._recompute_layout()
         self.update()
 
-    def set_lyrics(self, is_synced: bool, parsed: list[tuple[int, str]], empty_msg: str = ""):
+    def set_playback_clock(self, pos_ms: int, is_playing: bool, speed: float = 1.0, force_snap: bool = False):
+        now = time.monotonic()
+        self._is_playing = is_playing
+        self._clock_speed = max(0.25, float(speed))
+        if force_snap or not is_playing or abs(pos_ms - self._current_interpolated_ms(now)) > 90:
+            self._clock_anchor_ms = float(pos_ms)
+            self._clock_anchor_mono = now
+            self._smooth_pos_ms = pos_ms
+        if is_playing and self.has_elrc_words and not self._anim_timer.isActive():
+            self._last_tick_mono = now
+            self._anim_timer.start()
+
+    def _current_interpolated_ms(self, now: float) -> int:
+        if not self._is_playing:
+            return int(self._clock_anchor_ms)
+        return int(self._clock_anchor_ms + (now - self._clock_anchor_mono) * 1000.0 * self._clock_speed)
+
+    def set_lyrics(self, is_synced: bool, parsed: list[dict], empty_msg: str = ""):
         self.is_synced = is_synced
         self.active_idx = -1
         self.hover_idx = -1
         self.scroll_y = 0.0
         self.target_scroll_y = 0.0
         self.manual_browse_until = 0.0
+        self.has_elrc_words = any(bool(e.get("words")) for e in parsed)
 
         if not parsed:
-            self.lines = [{"time_ms": -1, "text": empty_msg, "focus": 0.6, "y": 0, "h": 40}]
+            self.lines = [{"time_ms": -1, "text": empty_msg, "words": [], "focus": 0.6, "y": 0, "h": 40, "rows": []}]
         else:
-            self.lines = [{"time_ms": t, "text": txt, "focus": 0.0, "y": 0, "h": 36} for t, txt in parsed]
+            self.lines = [
+                {
+                    "time_ms": e["time_ms"],
+                    "text": e["text"],
+                    "words": e.get("words", []),
+                    "focus": 0.0,
+                    "y": 0,
+                    "h": 36,
+                    "rows": [],
+                }
+                for e in parsed
+            ]
 
         self._cached_width = -1
         self._recompute_layout()
@@ -1502,7 +2014,35 @@ class AnimatedLyricsWidget(QWidget):
         self.active_idx = idx
         self._update_target_scroll()
         if not self._anim_timer.isActive():
+            self._last_tick_mono = time.monotonic()
             self._anim_timer.start()
+
+    def _wrap_elrc_words(self, words: list[dict], fm: QFontMetrics, wrap_w: int) -> tuple[list[dict], int]:
+        rows: list[dict] = []
+        cur_items: list[dict] = []
+        cur_w = 0
+        line_h = fm.height()
+
+        for w in words:
+            txt = w["text"]
+            w_px = fm.horizontalAdvance(txt)
+            if cur_items and cur_w + w_px > wrap_w and txt.strip():
+                rows.append({"items": cur_items, "y_off": len(rows) * line_h})
+                cur_items = []
+                cur_w = 0
+                txt_draw = txt.lstrip()
+                w_px = fm.horizontalAdvance(txt_draw)
+            else:
+                txt_draw = txt
+            cur_items.append(
+                {"text": txt_draw, "start_ms": w["start_ms"], "end_ms": w["end_ms"], "x": cur_w, "w": w_px}
+            )
+            cur_w += w_px
+
+        if cur_items:
+            rows.append({"items": cur_items, "y_off": len(rows) * line_h})
+        total_h = max(28, len(rows) * line_h + 8)
+        return rows, total_h
 
     def _recompute_layout(self):
         w = max(200, self.width() - 48)
@@ -1516,10 +2056,17 @@ class AnimatedLyricsWidget(QWidget):
         wrap_w = int(w / 1.13)
 
         for entry in self.lines:
-            txt = entry["text"] or "♪"
-            rect = fm.boundingRect(QRect(0, 0, wrap_w, 2000), Qt.TextFlag.TextWordWrap, txt)
-            entry["y"] = y
-            entry["h"] = max(28, rect.height() + 8)
+            if entry["words"]:
+                rows, h_px = self._wrap_elrc_words(entry["words"], fm, wrap_w)
+                entry["rows"] = rows
+                entry["y"] = y
+                entry["h"] = h_px
+            else:
+                txt = entry["text"] or "♪"
+                rect = fm.boundingRect(QRect(0, 0, wrap_w, 2000), Qt.TextFlag.TextWordWrap, txt)
+                entry["rows"] = []
+                entry["y"] = y
+                entry["h"] = max(28, rect.height() + 8)
             y += entry["h"] + 18
 
         self.max_scroll_y = max(0.0, float(y + 40 - self.height()))
@@ -1536,10 +2083,17 @@ class AnimatedLyricsWidget(QWidget):
         self.target_scroll_y = max(0.0, min(self.max_scroll_y, desired))
 
     def _tick_animation(self):
+        now = time.monotonic()
+        dt = max(0.002, min(0.05, now - self._last_tick_mono))
+        self._last_tick_mono = now
+
+        scroll_alpha = 1.0 - math.exp(-10.0 * dt)
+        focus_alpha = 1.0 - math.exp(-13.0 * dt)
+
         changed = False
         diff = self.target_scroll_y - self.scroll_y
-        if abs(diff) > 0.35:
-            self.scroll_y += diff * 0.14
+        if abs(diff) > 0.25:
+            self.scroll_y += diff * scroll_alpha
             changed = True
         elif diff != 0.0:
             self.scroll_y = self.target_scroll_y
@@ -1550,19 +2104,23 @@ class AnimatedLyricsWidget(QWidget):
             if not self.is_synced:
                 target_f = 0.5
             df = target_f - entry["focus"]
-            if abs(df) > 0.01:
-                entry["focus"] += df * 0.18
+            if abs(df) > 0.008:
+                entry["focus"] += df * focus_alpha
                 changed = True
             elif df != 0.0:
                 entry["focus"] = target_f
                 changed = True
 
+        if self._is_playing and self.has_elrc_words:
+            self._smooth_pos_ms = self._current_interpolated_ms(now)
+            changed = True
+
         if changed:
             self.update()
         else:
-            if self.is_synced and time.monotonic() >= self.manual_browse_until:
+            if self.is_synced and now >= self.manual_browse_until:
                 self._update_target_scroll()
-                if abs(self.target_scroll_y - self.scroll_y) <= 0.35:
+                if abs(self.target_scroll_y - self.scroll_y) <= 0.25:
                     self._anim_timer.stop()
             else:
                 self._anim_timer.stop()
@@ -1577,6 +2135,7 @@ class AnimatedLyricsWidget(QWidget):
         self.target_scroll_y = max(0.0, min(self.max_scroll_y, self.target_scroll_y - delta * 0.65))
         self.manual_browse_until = time.monotonic() + 3.0
         if not self._anim_timer.isActive():
+            self._last_tick_mono = time.monotonic()
             self._anim_timer.start()
         event.accept()
 
@@ -1607,10 +2166,16 @@ class AnimatedLyricsWidget(QWidget):
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self.is_synced:
             y_pos = event.position().y() + self.scroll_y
-            for entry in self.lines:
+            for i, entry in enumerate(self.lines):
                 if entry["y"] - 6 <= y_pos <= entry["y"] + entry["h"] + 6 and entry["time_ms"] >= 0:
                     self.manual_browse_until = 0.0
-                    self.lineClicked.emit(entry["time_ms"])
+                    target_ms = entry["time_ms"]
+                    if entry["words"]:
+                        target_ms = entry["words"][0]["start_ms"]
+                    self.set_playback_clock(target_ms, self._is_playing, self._clock_speed, force_snap=True)
+                    self.set_active_index(i)
+                    self.lineClicked.emit(target_ms)
+                    self.update()
                     return
 
     def paintEvent(self, event):
@@ -1621,10 +2186,23 @@ class AnimatedLyricsWidget(QWidget):
 
         w = self.width()
         h = self.height()
+
+        if self._backdrop_fn is not None:
+            bg_pm, offset = self._backdrop_fn()
+            if not bg_pm.isNull():
+                painter.drawPixmap(0, 0, bg_pm, offset.x(), offset.y(), w, h)
+            else:
+                painter.fillRect(0, 0, w, h, QColor(12, 16, 18))
+            painter.fillRect(0, 0, w, h, QColor(12, 16, 18, 148))
+        else:
+            painter.fillRect(0, 0, w, h, QColor(12, 16, 18))
+
         pad_x = 22
         wrap_w = int(max(200, w - 48) / 1.13)
         base_font = QFont(self.font_family, self.font_size, QFont.Weight.Bold)
+        fm = QFontMetrics(base_font)
         ac = self.accent_color
+        pos_ms = self._smooth_pos_ms
 
         for i, entry in enumerate(self.lines):
             draw_y = entry["y"] - self.scroll_y
@@ -1644,38 +2222,77 @@ class AnimatedLyricsWidget(QWidget):
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.drawRoundedRect(QRectF(10, draw_y - 4, w - 20, line_h + 8), 10, 10)
 
-            if self.is_synced:
-                base_alpha = 85 if i < self.active_idx else (255 if i == self.active_idx else 128)
-                alpha = int((base_alpha + (255 - base_alpha) * focus) * edge_fade)
-                r = int(214 + (ac.red() - 214) * focus * 0.35)
-                g = int(224 + (ac.green() - 224) * focus * 0.35)
-                b = int(222 + (ac.blue() - 222) * focus * 0.35)
-                text_color = QColor(255, 255, 255, alpha) if focus > 0.72 else QColor(r, g, b, alpha)
-            else:
-                text_color = QColor(232, 240, 238, int(230 * edge_fade))
-
             scale = 1.0 + (0.11 * focus if self.is_synced else 0.0)
-
             painter.save()
             painter.translate(pad_x, draw_y + line_h * 0.5)
             painter.scale(scale, scale)
             painter.setFont(base_font)
 
-            if self.is_synced and focus > 0.22:
-                glow = QColor(ac.red(), ac.green(), ac.blue(), int(110 * focus * edge_fade))
-                painter.setPen(glow)
+            if self.is_synced and entry["rows"] and i == self.active_idx:
+                top_y = -line_h * 0.5 + 4
+                row_h = fm.height()
+                for row in entry["rows"]:
+                    ry = top_y + row["y_off"]
+                    for wi in row["items"]:
+                        txt = wi["text"]
+                        if not txt:
+                            continue
+                        st = wi["start_ms"]
+                        en = wi["end_ms"]
+                        if pos_ms >= en:
+                            wc = QColor(255, 255, 255, int(255 * edge_fade))
+                            lift = 0.0
+                        elif st <= pos_ms < en:
+                            prog = (pos_ms - st) / max(1.0, float(en - st))
+                            lift = -1.5 * math.sin(prog * math.pi)
+                            glow_c = QColor(ac.red(), ac.green(), ac.blue(), int(145 * edge_fade))
+                            painter.setPen(glow_c)
+                            painter.drawText(
+                                QRectF(wi["x"] + 1, ry + lift + 1, wi["w"] + 8, row_h),
+                                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                                txt,
+                            )
+                            r_m = int(ac.red() + (255 - ac.red()) * 0.45)
+                            g_m = int(ac.green() + (255 - ac.green()) * 0.45)
+                            b_m = int(ac.blue() + (255 - ac.blue()) * 0.45)
+                            wc = QColor(r_m, g_m, b_m, int(255 * edge_fade))
+                        else:
+                            wc = QColor(255, 255, 255, int(115 * edge_fade))
+                            lift = 0.0
+
+                        painter.setPen(wc)
+                        painter.drawText(
+                            QRectF(wi["x"], ry + lift, wi["w"] + 8, row_h),
+                            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                            txt,
+                        )
+            else:
+                if self.is_synced:
+                    base_alpha = 85 if i < self.active_idx else (255 if i == self.active_idx else 128)
+                    alpha = int((base_alpha + (255 - base_alpha) * focus) * edge_fade)
+                    r = int(214 + (ac.red() - 214) * focus * 0.35)
+                    g = int(224 + (ac.green() - 224) * focus * 0.35)
+                    b = int(222 + (ac.blue() - 222) * focus * 0.35)
+                    text_color = QColor(255, 255, 255, alpha) if focus > 0.72 else QColor(r, g, b, alpha)
+                else:
+                    text_color = QColor(232, 240, 238, int(230 * edge_fade))
+
+                if self.is_synced and focus > 0.22:
+                    glow = QColor(ac.red(), ac.green(), ac.blue(), int(110 * focus * edge_fade))
+                    painter.setPen(glow)
+                    painter.drawText(
+                        QRectF(1, -line_h * 0.5 + 1, wrap_w, line_h),
+                        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter | Qt.TextFlag.TextWordWrap,
+                        entry["text"] or "♪",
+                    )
+
+                painter.setPen(text_color)
                 painter.drawText(
-                    QRectF(1, -line_h * 0.5 + 1, wrap_w, line_h),
+                    QRectF(0, -line_h * 0.5, wrap_w, line_h),
                     Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter | Qt.TextFlag.TextWordWrap,
                     entry["text"] or "♪",
                 )
 
-            painter.setPen(text_color)
-            painter.drawText(
-                QRectF(0, -line_h * 0.5, wrap_w, line_h),
-                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter | Qt.TextFlag.TextWordWrap,
-                entry["text"] or "♪",
-            )
             painter.restore()
 
 
@@ -1787,11 +2404,6 @@ class FirstLaunchDialog(QDialog):
             self.selected_folder = folder
             self.path_label.setText(folder)
             self.accept()
-
-
-# ---------------------------------------------------------------------------
-# Main NanoTune Window
-# ---------------------------------------------------------------------------
 class NanoTuneApp(QMainWindow):
     fxDecodedReady = Signal(str, object, str)
     coverPreloaded = Signal(str, object, object)
@@ -1811,6 +2423,7 @@ class NanoTuneApp(QMainWindow):
         self.albums_map: dict[str, dict] = {}
         self.active_album_filter: str = ""
         self.current_index: int = -1
+        self.active_track_path: str = ""
 
         self.shuffle_enabled: bool = False
         self.shuffle_queue: list[int] = []
@@ -1824,13 +2437,17 @@ class NanoTuneApp(QMainWindow):
         self.current_lyrics_raw: str = ""
         self.current_lyrics_source: str = ""
         self.is_synced_lyrics: bool = False
-        self.parsed_lyrics: list[tuple[int, str]] = []
+        self.parsed_lyrics: list[dict] = []
         self.active_lyric_row: int = -1
         self.editing_lyrics: bool = False
 
         self.accent_color: str = STAR_DEFAULT_YELLOW
         self.accent_color_2: str = STAR_DEFAULT_YELLOW_2
         self.active_font_family: str = self.resolve_configured_font()
+
+        screen = QApplication.primaryScreen()
+        self.monitor_hz: float = float(screen.refreshRate()) if (screen and screen.refreshRate() > 1.0) else 60.0
+        self._screen_hooked: bool = False
 
         self.thumb_cache: dict[str, QPixmap] = {}
         self.album_cover_cache: dict[str, QPixmap] = {}
@@ -1842,6 +2459,9 @@ class NanoTuneApp(QMainWindow):
         self.coverPreloaded.connect(self.on_cover_preloaded)
 
         self._smtc = None
+        self._winrt_mp = None
+        self._smtc_btn_handler = None
+        self._smtc_token = None
         self._smtc_initialized = False
         self.smtcButtonPressed.connect(self.on_smtc_button)
 
@@ -1853,6 +2473,8 @@ class NanoTuneApp(QMainWindow):
         self.cover_pil: Image.Image = self.default_nano_pil
         self.cover_pixmap: QPixmap = QPixmap()
         self.blurred_pixmap: QPixmap = QPixmap()
+        self._bg_scaled_cache: QPixmap = QPixmap()
+        self._bg_cache_size: QSize = QSize()
 
         self.audio_output = QAudioOutput(self)
         self.player = QMediaPlayer(self)
@@ -1871,22 +2493,48 @@ class NanoTuneApp(QMainWindow):
         self.fx_link_pitch: bool = True
         self.fx_bass: float = 0.0
         self.fx_reverb: float = 0.0
+        self.fx_lofi: bool = False
         self.fx_decoded_path: str = ""
         self.fx_decoded_pcm = None
         self.fx_pending_activate: bool = False
         self.fx_pending_seek_ms: int = 0
+        self._last_known_pos_ms: int = 0
+        self._seek_guard_until: float = 0.0
+        self._qt_ignore_state_until: float = 0.0
+        self._pending_qt_seek_ms: int = -1
+        self._pending_qt_play: bool = False
 
         self.fx_device = FXStreamDevice(self)
         self.fx_sink: QAudioSink | None = None
         self.fx_poll_timer = QTimer(self)
-        self.fx_poll_timer.setInterval(50)
+        self.fx_poll_timer.setInterval(max(6, min(33, int(round(1000.0 / max(60.0, self.monitor_hz))))))
         self.fx_poll_timer.timeout.connect(self.on_fx_poll)
         self.fxDecodedReady.connect(self.on_fx_decode_finished)
 
+        self._fx_param_timer = QTimer(self)
+        self._fx_param_timer.setSingleShot(True)
+        self._fx_param_timer.setInterval(16)
+        self._fx_param_timer.timeout.connect(self._apply_fx_params_debounced)
+
+        self._fx_release_timer = QTimer(self)
+        self._fx_release_timer.setSingleShot(True)
+        self._fx_release_timer.setInterval(250)
+        self._fx_release_timer.timeout.connect(self._release_fx_to_qt)
+
+        self._no_wheel_filter = NoWheelEventFilter(self)
+        self._space_filter = GlobalSpacePlayPauseFilter(self)
+        QApplication.instance().installEventFilter(self._space_filter)
+
+        avail = screen.availableGeometry() if screen else QRect(0, 0, 1280, 720)
+        target_w = max(780, min(1480, int(avail.width() * 0.86)))
+        target_h = max(560, min(940, int(avail.height() * 0.90)))
+        target_h = min(target_h, avail.height() - 34)
+
         self.setWindowTitle("4L Launcher" if self.is_fourl_mode() else "NanoTune")
         self.setWindowIcon(self.app_icon)
-        self.resize(1180, 760)
         self.setMinimumSize(780, 560)
+        self.resize(target_w, target_h)
+        self.move(avail.x() + (avail.width() - target_w) // 2, avail.y() + max(4, (avail.height() - target_h) // 2))
 
         QShortcut(QKeySequence(Qt.Key.Key_F11), self, activated=self.toggle_fullscreen)
 
@@ -1901,10 +2549,8 @@ class NanoTuneApp(QMainWindow):
         return bool(self.config.get("fourl_mode", False))
 
     def resolve_configured_font(self) -> str:
-        idx = int(self.config.get("font_index", 0))
-        if 0 <= idx < len(FONT_PRESETS):
-            return resolve_font_family(FONT_PRESETS[idx][1])
-        return "Segoe UI"
+        idx = max(0, min(len(FONT_PRESETS) - 1, int(self.config.get("font_index", 0))))
+        return resolve_font_family(FONT_PRESETS[idx][1])
 
     def load_config(self) -> dict:
         defaults = {
@@ -1927,6 +2573,7 @@ class NanoTuneApp(QMainWindow):
                 defaults.update(data)
             except Exception:
                 pass
+        defaults["font_index"] = max(0, min(len(FONT_PRESETS) - 1, int(defaults.get("font_index", 0))))
         return defaults
 
     def save_config(self):
@@ -1965,7 +2612,7 @@ class NanoTuneApp(QMainWindow):
         self.album_cover_cache["__4L__"] = self.pil_to_qpixmap(self.default_4l_pil.resize((220, 220), Image.Resampling.LANCZOS))
         self.album_cover_cache["__DEFAULT__"] = self.pil_to_qpixmap(self.default_nano_pil.resize((220, 220), Image.Resampling.LANCZOS))
 
-        if self.current_index < 0:
+        if not self.active_track_path and not self.is_playing:
             if self.is_fourl_mode():
                 self.apply_cover_pil(self.default_4l_pil, is_4l_track=True)
             else:
@@ -2029,45 +2676,61 @@ class NanoTuneApp(QMainWindow):
         darkened = ImageEnhance.Brightness(blurred).enhance(0.58)
         saturated = ImageEnhance.Color(darkened).enhance(1.25)
         self.blurred_pixmap = self.pil_to_qpixmap(saturated)
+        self._bg_scaled_cache = QPixmap()
         self.update()
 
     def should_show_blurred_bg(self) -> bool:
         on_lyrics = hasattr(self, "stack") and self.stack.currentIndex() == 2
         return (
             self.is_playing
-            or self.current_index >= 0
+            or bool(self.active_track_path)
             or on_lyrics
             or self.editing_lyrics
             or bool(self.config.get("always_blur_bg", True))
         )
 
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        rect = self.rect()
+    def ensure_bg_cache(self) -> QPixmap:
+        sz = self.size()
+        if sz.width() <= 0 or sz.height() <= 0:
+            return QPixmap()
+        if not self._bg_scaled_cache.isNull() and self._bg_cache_size == sz:
+            return self._bg_scaled_cache
 
+        pm = QPixmap(sz)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         if self.should_show_blurred_bg() and not self.blurred_pixmap.isNull():
             scaled = self.blurred_pixmap.scaled(
-                rect.size(),
+                sz,
                 Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                 Qt.TransformationMode.SmoothTransformation,
             )
-            x = (rect.width() - scaled.width()) // 2
-            y = (rect.height() - scaled.height()) // 2
-            painter.drawPixmap(x, y, scaled)
+            x = (sz.width() - scaled.width()) // 2
+            y = (sz.height() - scaled.height()) // 2
+            p.drawPixmap(x, y, scaled)
             ac = QColor(self.accent_color)
-            grad = QLinearGradient(0, 0, rect.width(), rect.height())
+            grad = QLinearGradient(0, 0, sz.width(), sz.height())
             grad.setColorAt(0.0, QColor(8, 11, 12, 98))
             grad.setColorAt(0.5, QColor(ac.red() // 11, ac.green() // 11, ac.blue() // 11, 78))
             grad.setColorAt(1.0, QColor(6, 9, 10, 140))
-            painter.fillRect(rect, grad)
+            p.fillRect(QRect(0, 0, sz.width(), sz.height()), grad)
         else:
-            grad = QLinearGradient(0, 0, rect.width(), rect.height())
+            grad = QLinearGradient(0, 0, sz.width(), sz.height())
             grad.setColorAt(0.0, QColor("#0B0D0E"))
             grad.setColorAt(0.55, QColor("#0F1416"))
             grad.setColorAt(1.0, QColor("#090E10"))
-            painter.fillRect(rect, grad)
+            p.fillRect(QRect(0, 0, sz.width(), sz.height()), grad)
+        p.end()
 
+        self._bg_scaled_cache = pm
+        self._bg_cache_size = sz
+        return pm
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        bg = self.ensure_bg_cache()
+        if not bg.isNull():
+            painter.drawPixmap(0, 0, bg)
         super().paintEvent(event)
 
     def showEvent(self, event):
@@ -2075,6 +2738,19 @@ class NanoTuneApp(QMainWindow):
         enable_windows_dark_titlebar(int(self.winId()))
         self.position_sidebar_toggle()
         self.init_windows_smtc()
+        if not self._screen_hooked and self.windowHandle() is not None:
+            self._screen_hooked = True
+            self.windowHandle().screenChanged.connect(self._on_screen_changed)
+            self._on_screen_changed(self.windowHandle().screen())
+
+    def _on_screen_changed(self, screen):
+        if screen is None:
+            return
+        hz = float(screen.refreshRate()) if screen.refreshRate() > 1.0 else 60.0
+        if abs(hz - self.monitor_hz) > 0.5:
+            self.monitor_hz = hz
+            self.lyrics_view.set_refresh_rate(hz)
+            self.fx_poll_timer.setInterval(max(6, min(33, int(round(1000.0 / max(60.0, hz))))))
 
     def position_sidebar_toggle(self):
         if hasattr(self, "sb_toggle_btn") and hasattr(self, "sidebar"):
@@ -2083,10 +2759,13 @@ class NanoTuneApp(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._bg_scaled_cache = QPixmap()
         self.position_sidebar_toggle()
         self.update_responsive_layouts()
 
     def closeEvent(self, event):
+        if hasattr(self, "_space_filter") and QApplication.instance() is not None:
+            QApplication.instance().removeEventFilter(self._space_filter)
         self._preloader_stop.set()
         self.stop_fx_sink()
         if hasattr(self, "tray_icon"):
@@ -2094,21 +2773,50 @@ class NanoTuneApp(QMainWindow):
         super().closeEvent(event)
 
     # -----------------------------------------------------------------------
-    # Windows 10 SMTC (Volume Overlay + Media Keys) & System Tray Controls
+    # Windows 10/11 SMTC (Volume Overlay + Media Keys) & System Tray Controls
     # -----------------------------------------------------------------------
     def init_windows_smtc(self):
-        if not HAS_WINRT_SMTC or self._smtc_initialized or sys.platform != "win32":
+        if not HAS_WINRT_SMTC or self._smtc_initialized or sys.platform != "win32" or IS_LEGACY_WIN:
             return
         self._smtc_initialized = True
+        smtc = None
         try:
-            smtc = winrt_smtc_for_window(int(self.winId()))
+            # Prefer MediaPlayer SMTC first (full Win10/11 Shell transport & thumbnail support)
+            if WinRtMediaPlayer is not None:
+                try:
+                    self._winrt_mp = WinRtMediaPlayer()
+                    self._winrt_mp.command_manager.is_enabled = False
+                    smtc = self._winrt_mp.system_media_transport_controls
+                except Exception:
+                    smtc = None
+            if smtc is None and winrt_smtc_for_window is not None:
+                try:
+                    smtc = winrt_smtc_for_window(int(self.winId()))
+                except Exception:
+                    smtc = None
+            if smtc is None:
+                return
+
             smtc.is_enabled = True
             smtc.is_play_enabled = True
             smtc.is_pause_enabled = True
             smtc.is_next_enabled = True
             smtc.is_previous_enabled = True
-            smtc.add_button_pressed(lambda _s, args: self.smtcButtonPressed.emit(int(args.button)))
+            smtc.is_stop_enabled = True
+
+            def _on_btn_pressed(_sender, args):
+                try:
+                    btn = getattr(args, "button", None)
+                    val = int(btn.value) if hasattr(btn, "value") else int(btn)
+                    self.smtcButtonPressed.emit(val)
+                except Exception:
+                    pass
+
+            self._smtc_btn_handler = _on_btn_pressed
+            self._smtc_token = smtc.add_button_pressed(self._smtc_btn_handler)
             self._smtc = smtc
+            self._smtc_last_thumb_sig = None
+            self._smtc_thumb_ref = None
             self.update_windows_smtc()
         except Exception:
             self._smtc = None
@@ -2118,17 +2826,58 @@ class NanoTuneApp(QMainWindow):
             return
         if btn_val in (int(SystemMediaTransportControlsButton.PLAY), int(SystemMediaTransportControlsButton.PAUSE)):
             self.toggle_play_pause()
+        elif btn_val == int(SystemMediaTransportControlsButton.STOP):
+            if self.is_playing:
+                self.toggle_play_pause()
         elif btn_val == int(SystemMediaTransportControlsButton.NEXT):
             self.play_next()
         elif btn_val == int(SystemMediaTransportControlsButton.PREVIOUS):
             self.play_previous()
 
+    def _get_active_track_dict(self) -> dict | None:
+        if 0 <= self.current_index < len(self.tracks):
+            return self.tracks[self.current_index]
+        if self.active_track_path:
+            for t in self.all_tracks:
+                if t["path"] == self.active_track_path:
+                    return t
+        return None
+
+    def _build_smtc_stream_reference(self, img: Image.Image):
+        """Creates an in-memory RandomAccessStreamReference (works reliably with Windows Shell SMTC)."""
+        buf = BytesIO()
+        img.convert("RGB").resize((300, 300), Image.Resampling.LANCZOS).save(buf, format="JPEG", quality=92)
+        raw_bytes = buf.getvalue()
+
+        stream = InMemoryRandomAccessStream()
+        writer = DataWriter(stream.get_output_stream_at(0))
+        writer.write_bytes(raw_bytes)
+        store_op = writer.store_async()
+        deadline = time.monotonic() + 0.5
+        while int(store_op.status) == 0 and time.monotonic() < deadline:
+            time.sleep(0.002)
+        store_op.get_results()
+        flush_op = writer.flush_async()
+        while int(flush_op.status) == 0 and time.monotonic() < deadline:
+            time.sleep(0.002)
+        flush_op.get_results()
+        writer.detach_stream()
+        stream.seek(0)
+        self._smtc_keepalive_stream = stream
+        return RandomAccessStreamReference.create_from_stream(stream)
+
     def update_windows_smtc(self):
-        if not HAS_WINRT_SMTC or self._smtc is None:
+        if not HAS_WINRT_SMTC or self._smtc is None or IS_LEGACY_WIN:
             return
         try:
-            if 0 <= self.current_index < len(self.tracks):
-                tr = self.tracks[self.current_index]
+            tr = self._get_active_track_dict()
+            if tr is not None:
+                self._smtc.is_enabled = True
+                self._smtc.is_play_enabled = True
+                self._smtc.is_pause_enabled = True
+                self._smtc.is_next_enabled = len(self.tracks) > 0
+                self._smtc.is_previous_enabled = len(self.tracks) > 0
+                self._smtc.is_stop_enabled = True
                 self._smtc.playback_status = (
                     MediaPlaybackStatus.PLAYING if self.is_playing else MediaPlaybackStatus.PAUSED
                 )
@@ -2137,13 +2886,37 @@ class NanoTuneApp(QMainWindow):
                 updater.music_properties.title = tr["display_title"]
                 updater.music_properties.artist = tr["artist"]
                 updater.music_properties.album_title = tr.get("album", "")
-                thumb_path = self.cfg_dir / "smtc_cover.jpg"
-                self.cover_pil.resize((256, 256), Image.Resampling.LANCZOS).save(thumb_path, format="JPEG", quality=90)
-                updater.thumbnail = RandomAccessStreamReference.create_from_uri(
-                    WinRtUri(thumb_path.resolve().as_uri())
-                )
+
+                thumb_sig = (tr["path"], id(self.cover_pil))
+                if getattr(self, "_smtc_last_thumb_sig", None) != thumb_sig:
+                    self._smtc_last_thumb_sig = thumb_sig
+                    thumb_ref = None
+                    try:
+                        thumb_ref = self._build_smtc_stream_reference(self.cover_pil)
+                    except Exception:
+                        thumb_ref = None
+                    if thumb_ref is None:
+                        try:
+                            thumb_path = self.cfg_dir / "smtc_cover.jpg"
+                            self.cover_pil.convert("RGB").resize((300, 300), Image.Resampling.LANCZOS).save(
+                                thumb_path, format="JPEG", quality=92
+                            )
+                            sf_op = StorageFile.get_file_from_path_async(str(thumb_path.resolve()))
+                            deadline = time.monotonic() + 0.5
+                            while int(sf_op.status) == 0 and time.monotonic() < deadline:
+                                time.sleep(0.002)
+                            sf = sf_op.get_results()
+                            thumb_ref = RandomAccessStreamReference.create_from_file(sf)
+                        except Exception:
+                            thumb_ref = None
+                    self._smtc_thumb_ref = thumb_ref
+
+                if self._smtc_thumb_ref is not None:
+                    updater.thumbnail = self._smtc_thumb_ref
                 updater.update()
             else:
+                self._smtc.is_next_enabled = False
+                self._smtc.is_previous_enabled = False
                 self._smtc.playback_status = MediaPlaybackStatus.STOPPED
         except Exception:
             pass
@@ -2212,8 +2985,8 @@ class NanoTuneApp(QMainWindow):
         if not hasattr(self, "tray_icon"):
             return
         app_label = "4L Launcher" if self.is_fourl_mode() else "NanoTune"
-        if 0 <= self.current_index < len(self.tracks):
-            tr = self.tracks[self.current_index]
+        tr = self._get_active_track_dict()
+        if tr is not None:
             prefix = "Playing" if self.is_playing else "Paused"
             status_txt = f"{prefix}: {tr['display_title']} — {tr['artist']}"
             self.tray_now_playing_act.setText(status_txt)
@@ -2244,8 +3017,19 @@ class NanoTuneApp(QMainWindow):
         clear_act = line_edit.addAction(make_vector_icon("close", "#9EB0AD", 14), QLineEdit.ActionPosition.TrailingPosition)
         clear_act.setToolTip("Clear search")
         clear_act.setVisible(False)
-        clear_act.triggered.connect(line_edit.clear)
+
+        def _on_clear_clicked():
+            line_edit.clear()
+            line_edit.clearFocus()
+            self.setFocus(Qt.FocusReason.OtherFocusReason)
+
+        clear_act.triggered.connect(_on_clear_clicked)
         line_edit.textChanged.connect(lambda txt, act=clear_act: act.setVisible(bool(txt)))
+
+        from PySide6.QtWidgets import QToolButton
+        for tb in line_edit.findChildren(QToolButton):
+            tb.setCursor(Qt.CursorShape.PointingHandCursor)
+
         return clear_act
 
     def build_ui(self):
@@ -2265,26 +3049,32 @@ class NanoTuneApp(QMainWindow):
         self.sidebar.setObjectName("sidebar")
         self.sidebar.setFixedWidth(240)
         sb_lay = QVBoxLayout(self.sidebar)
-        sb_lay.setContentsMargins(14, 18, 14, 16)
+        sb_lay.setContentsMargins(16, 18, 16, 16)
         sb_lay.setSpacing(6)
 
         brand_row = QHBoxLayout()
-        brand_row.setSpacing(10)
+        brand_row.setContentsMargins(0, 0, 0, 0)
+        brand_row.setSpacing(0)
         self.brand_badge = QLabel()
         self.brand_badge.setObjectName("brandBadge")
         self.brand_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.brand_badge.setFixedSize(40, 40)
 
         self.brand_text_wrap = QWidget()
-        bt_lay = QVBoxLayout(self.brand_text_wrap)
-        bt_lay.setContentsMargins(0, 0, 0, 0)
-        bt_lay.setSpacing(1)
+        self.brand_text_wrap.setMinimumWidth(0)
+        self.brand_text_wrap = QWidget()
+        self.brand_text_wrap.setMinimumWidth(0)
+        self.bt_lay = QVBoxLayout(self.brand_text_wrap)
+        self.bt_lay.setContentsMargins(10, 0, 0, 0)
+        self.bt_lay.setSpacing(1)
         self.lbl_app = QLabel("NANOTUNE")
         self.lbl_app.setObjectName("brandTitle")
+        self.lbl_app.setMinimumWidth(0)
         self.lbl_brand_sub = QLabel("MUSIC PLAYER")
         self.lbl_brand_sub.setObjectName("brandSub")
-        bt_lay.addWidget(self.lbl_app)
-        bt_lay.addWidget(self.lbl_brand_sub)
+        self.lbl_brand_sub.setMinimumWidth(0)
+        self.bt_lay.addWidget(self.lbl_app)
+        self.bt_lay.addWidget(self.lbl_brand_sub)
 
         self.sb_toggle_btn = QPushButton(root)
         self.sb_toggle_btn.setObjectName("sbToggleBtn")
@@ -2294,7 +3084,7 @@ class NanoTuneApp(QMainWindow):
         self.sb_toggle_btn.setToolTip("Collapse / Expand Sidebar")
         self.sb_toggle_btn.clicked.connect(self.toggle_sidebar)
 
-        brand_row.addWidget(self.brand_badge)
+        brand_row.addWidget(self.brand_badge, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         brand_row.addWidget(self.brand_text_wrap, 1)
         sb_lay.addLayout(brand_row)
         sb_lay.addSpacing(14)
@@ -2310,6 +3100,7 @@ class NanoTuneApp(QMainWindow):
         for label, icon_name, idx in nav_defs:
             btn = QPushButton(f"  {label}")
             btn.setObjectName("navBtn")
+            btn.setMinimumWidth(0)
             btn.setCheckable(True)
             btn.setIconSize(QSize(18, 18))
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -2321,11 +3112,14 @@ class NanoTuneApp(QMainWindow):
 
         self.sb_status_card = QFrame()
         self.sb_status_card.setObjectName("sbStatusCard")
+        self.sb_status_card.setMinimumWidth(0)
         sc_lay = QVBoxLayout(self.sb_status_card)
         sc_lay.setContentsMargins(12, 12, 12, 12)
         sc_lay.setSpacing(4)
         self.sb_count_lbl = QLabel("0 tracks loaded")
+        self.sb_count_lbl.setMinimumWidth(0)
         self.sb_folder_lbl = QLabel("No folders selected")
+        self.sb_folder_lbl.setMinimumWidth(0)
         self.sb_folder_lbl.setStyleSheet("color: #889896; font-size: 11px;")
         sc_lay.addWidget(self.sb_count_lbl)
         sc_lay.addWidget(self.sb_folder_lbl)
@@ -2350,6 +3144,11 @@ class NanoTuneApp(QMainWindow):
 
         outer.addWidget(self.build_player_bar())
         self.position_sidebar_toggle()
+
+        for btn in self.findChildren(QPushButton):
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.setAutoDefault(False)
+            btn.setDefault(False)
 
         self.update_cover_widgets()
         self.switch_page(0)
@@ -2376,7 +3175,7 @@ class NanoTuneApp(QMainWindow):
         self.lib_tag_lbl.setObjectName("accentTag")
         self.lib_title_lbl = QLabel("All Tracks")
         self.lib_title_lbl.setStyleSheet("color: #FFFFFF; font-size: 34px; font-weight: 900;")
-        self.lib_artist_lbl = QLabel("Lightweight Player  •  Adaptive Album Themes")
+        self.lib_artist_lbl = QLabel("0 tracks  •  0 albums  •  0 folders")
         self.lib_artist_lbl.setStyleSheet("color: #C7D4D2; font-size: 13px; font-weight: 600;")
 
         action_row = QHBoxLayout()
@@ -2575,9 +3374,12 @@ class NanoTuneApp(QMainWindow):
 
         self.lyrics_stack = QStackedWidget()
 
-        self.lyrics_view = AnimatedLyricsWidget()
+        self.lyrics_view = AnimatedLyricsWidget(refresh_hz=self.monitor_hz)
         self.lyrics_view.set_font_size(int(self.config.get("lyric_font_size", 19)))
         self.lyrics_view.set_font_family(self.active_font_family)
+        self.lyrics_view.set_backdrop_fn(
+            lambda: (self.ensure_bg_cache(), self.lyrics_view.mapTo(self, QRect(0, 0, 1, 1).topLeft()))
+        )
         self.lyrics_view.lineClicked.connect(self.seek_to_ms)
         self.lyrics_stack.addWidget(self.lyrics_view)
 
@@ -2587,7 +3389,7 @@ class NanoTuneApp(QMainWindow):
         ed_lay.setSpacing(10)
 
         tip = QLabel(
-            "Enter plain lyrics or synced LRC lines (e.g. [00:14.20] Line text). "
+            "Enter plain lyrics, standard .LRC lines, or Enhanced .ELRC word timestamps (<mm:ss.xxx>). "
             "Use 'Stamp Current Time' while playing to sync."
         )
         tip.setWordWrap(True)
@@ -2604,7 +3406,7 @@ class NanoTuneApp(QMainWindow):
         self.stamp_btn.setObjectName("secondaryBtn")
         self.stamp_btn.clicked.connect(self.stamp_current_time)
 
-        self.save_lrc_btn = QPushButton(" Save .LRC")
+        self.save_lrc_btn = QPushButton(" Save .LRC / .ELRC")
         self.save_lrc_btn.setObjectName("primaryBtn")
         self.save_lrc_btn.clicked.connect(lambda: self.save_edited_lyrics(to_lrc=True, to_tag=False))
 
@@ -2682,12 +3484,12 @@ class NanoTuneApp(QMainWindow):
             self.folders_list.addItem(fd)
         c_lay.addWidget(self.folders_list)
 
-        self.chk_fourl_mode = QCheckBox("4L Mode (Original Yeat 4L Launcher theme, icon, dedication & strict 4L tracklist)")
+        self.chk_fourl_mode = QCheckBox("4L Mode (Original Yeat 4L Launcher theme, icon && strict 4L tracklist)")
         self.chk_fourl_mode.setChecked(self.is_fourl_mode())
         self.chk_fourl_mode.toggled.connect(self.on_fourl_mode_toggled)
         c_lay.addWidget(self.chk_fourl_mode)
 
-        self.chk_adaptive_colors = QCheckBox("Adaptive UI & Star Colors (auto-theme from album covers, B&W -> silver-grey)")
+        self.chk_adaptive_colors = QCheckBox("Adaptive UI && Star Colors (auto-theme from album covers, B&W -> silver-grey)")
         self.chk_adaptive_colors.setChecked(bool(self.config.get("adaptive_colors", True)))
         self.chk_adaptive_colors.toggled.connect(self.on_settings_changed)
         c_lay.addWidget(self.chk_adaptive_colors)
@@ -2703,11 +3505,13 @@ class NanoTuneApp(QMainWindow):
         c_lay.addWidget(self.chk_always_blur)
 
         font_pick_row = QHBoxLayout()
-        fp_lbl = QLabel("App & Lyrics Font (20 Presets):")
+        fp_lbl = QLabel("App & Lyrics Font (15 Built-In Windows Presets):")
         fp_lbl.setStyleSheet("color: #D2DFDD; font-size: 13px; font-weight: 600;")
         self.font_combo = QComboBox()
-        for label, _cands in FONT_PRESETS:
+        self.font_combo.installEventFilter(self._no_wheel_filter)
+        for i, (label, cands) in enumerate(FONT_PRESETS):
             self.font_combo.addItem(label)
+            self.font_combo.setItemData(i, QFont(resolve_font_family(cands), 11), Qt.ItemDataRole.FontRole)
         self.font_combo.setCurrentIndex(int(self.config.get("font_index", 0)))
         self.font_combo.currentIndexChanged.connect(self.on_font_preset_changed)
         font_pick_row.addWidget(fp_lbl)
@@ -2717,7 +3521,8 @@ class NanoTuneApp(QMainWindow):
         blur_row = QHBoxLayout()
         blur_lbl = QLabel("Background Blur Intensity:")
         blur_lbl.setStyleSheet("color: #D2DFDD; font-size: 13px;")
-        self.blur_slider = QSlider(Qt.Orientation.Horizontal)
+        self.blur_slider = SeekSlider(Qt.Orientation.Horizontal)
+        self.blur_slider.installEventFilter(self._no_wheel_filter)
         self.blur_slider.setRange(10, 66)
         self.blur_slider.setValue(int(self.config.get("blur_radius", 34)))
         self.blur_slider.valueChanged.connect(self.on_blur_slider_changed)
@@ -2728,7 +3533,8 @@ class NanoTuneApp(QMainWindow):
         font_row = QHBoxLayout()
         font_lbl = QLabel("Lyrics Font Size:")
         font_lbl.setStyleSheet("color: #D2DFDD; font-size: 13px;")
-        self.font_slider = QSlider(Qt.Orientation.Horizontal)
+        self.font_slider = SeekSlider(Qt.Orientation.Horizontal)
+        self.font_slider.installEventFilter(self._no_wheel_filter)
         self.font_slider.setRange(14, 28)
         self.font_slider.setValue(int(self.config.get("lyric_font_size", 19)))
         self.font_slider.valueChanged.connect(self.on_font_slider_changed)
@@ -2736,14 +3542,25 @@ class NanoTuneApp(QMainWindow):
         font_row.addWidget(self.font_slider, 1)
         c_lay.addLayout(font_row)
 
-        gfx_lbl = QLabel("Graphics Renderer (Auto-detects DX 10.1 on 1st launch)")
+        gfx_lbl = QLabel("Graphics Renderer (Auto-detects on 1st launch)")
         gfx_lbl.setStyleSheet("color: #EAF0EE; font-size: 14px; font-weight: 700;")
         c_lay.addWidget(gfx_lbl)
 
         gfx_row = QHBoxLayout()
         self.gfx_combo = QComboBox()
-        self.gfx_combo.addItem("DirectX 10.1 (Windows D3D Feature Level 10_1)", "dx10_1")
-        self.gfx_combo.addItem("OpenGL 2.1 (Hardware Desktop OpenGL)", "opengl21")
+        self.gfx_combo.installEventFilter(self._no_wheel_filter)
+        dx_label = (
+            "DirectX 10.0 Fallback (Windows D3D Feature Level 10_0)"
+            if DX_LEVEL == "10.0"
+            else "DirectX 10.1 (Windows D3D Feature Level 10_1)"
+        )
+        gl_label = (
+            "OpenGL 2.0 Fallback (Hardware Desktop OpenGL)"
+            if GL_VER_TUPLE == (2, 0)
+            else "OpenGL 2.1 (Hardware Desktop OpenGL)"
+        )
+        self.gfx_combo.addItem(dx_label, "dx10_1")
+        self.gfx_combo.addItem(gl_label, "opengl21")
         self.gfx_combo.addItem("Software Rendering (Native CPU Rasterizer)", "software")
         cur_idx = self.gfx_combo.findData(self.config.get("graphics_backend", SELECTED_BACKEND))
         if cur_idx >= 0:
@@ -2756,12 +3573,14 @@ class NanoTuneApp(QMainWindow):
         gfx_row.addWidget(apply_gfx_btn)
         c_lay.addLayout(gfx_row)
 
-        diag_lbl = QLabel(f"Status: {describe_graphics_backend(SELECTED_BACKEND)}  •  Saved: {self.cfg_dir}")
+        diag_lbl = QLabel(
+            f"Status: {describe_graphics_backend(SELECTED_BACKEND)}  •  Display: {int(round(self.monitor_hz))} Hz  •  Saved: {self.cfg_dir}"
+        )
         diag_lbl.setObjectName("accentTag")
         diag_lbl.setWordWrap(True)
         c_lay.addWidget(diag_lbl)
 
-        reset_btn = QPushButton("Reset Setup & Clear Folders")
+        reset_btn = QPushButton("Reset Setup && Clear Folders")
         reset_btn.setObjectName("secondaryBtn")
         reset_btn.setFixedWidth(220)
         reset_btn.clicked.connect(self.reset_setup)
@@ -2810,9 +3629,9 @@ class NanoTuneApp(QMainWindow):
 
         specs = QLabel(
             "• Audio Formats: FLAC (16/24-bit), MP3, WAV, M4A, OGG, OPUS\n"
-            "• Audio FX Rack: Playback Speed, Pitch Shift, Warm Low-Shelf Bass Boost, Overlap-Add Hall Reverb\n"
-            "• Lyrics Engine: 60 FPS Animated .LRC + Embedded FLAC / ID3 / MP4 Lyrics + Built-in Sync Editor\n"
-            "• Render Modes: DirectX 10.1 (Auto-Detected), OpenGL 2.1, Native CPU Rasterizer"
+            "• Audio FX Rack: Speed, Pitch, Warm 155 Hz Sub-Bass Boost, Hall Reverb, 1400 Hz Lo-Fi Muffle\n"
+            "• Lyrics Engine: High-FPS Word-by-Word .ELRC + .LRC + Embedded FLAC / ID3 / MP4 Lyrics + Sync Editor\n"
+            "• Render Modes: DirectX 10.1, OpenGL 2.1, Native CPU Rasterizer"
         )
         specs.setStyleSheet(
             "background-color: rgba(11, 15, 16, 175); border: 1px solid rgba(255, 255, 255, 28); "
@@ -2837,15 +3656,28 @@ class NanoTuneApp(QMainWindow):
         self.fx_top_grid.setContentsMargins(0, 0, 0, 0)
         self.fx_top_grid.setSpacing(8)
 
-        self.fx_title_lbl = QLabel("AUDIO FX  •  SLOWED + REVERB / SPEED / PITCH / BASS")
+        self.fx_title_lbl = QLabel("AUDIO FX  •  SLOWED + REVERB / SPEED / PITCH / BASS / LO-FI")
         self.fx_title_lbl.setObjectName("accentTag")
 
         self.fx_presets_row = QWidget()
         pr_lay = QHBoxLayout(self.fx_presets_row)
         pr_lay.setContentsMargins(0, 0, 0, 0)
         pr_lay.setSpacing(6)
+
+        norm_btn = QPushButton("Normal")
+        norm_btn.setObjectName("secondaryBtn")
+        norm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        norm_btn.clicked.connect(lambda: self.apply_fx_preset("normal"))
+        pr_lay.addWidget(norm_btn)
+
+        self.lofi_btn = QPushButton("Lo-Fi Muffle")
+        self.lofi_btn.setObjectName("lofiToggleBtn")
+        self.lofi_btn.setCheckable(True)
+        self.lofi_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.lofi_btn.toggled.connect(self.on_fx_sliders_changed)
+        pr_lay.addWidget(self.lofi_btn)
+
         for label, preset in (
-            ("Normal", "normal"),
             ("Slowed + Reverb", "slowed_reverb"),
             ("Warm Bass", "bass"),
             ("Sped Up", "nightcore"),
@@ -2863,7 +3695,7 @@ class NanoTuneApp(QMainWindow):
 
         if not HAS_FX_DSP:
             warn_row = QHBoxLayout()
-            warn = QLabel("Optional FX packages ('numpy', 'av') are not installed for Pitch, Bass Boost & Reverb.")
+            warn = QLabel("Optional FX packages ('numpy', 'av') are not installed for Pitch, Bass, Reverb & Lo-Fi.")
             warn.setStyleSheet("color: #F4B942; font-size: 12px; font-weight: 600;")
             install_fx_btn = QPushButton("Install FX Packages")
             install_fx_btn.setObjectName("secondaryBtn")
@@ -2878,28 +3710,32 @@ class NanoTuneApp(QMainWindow):
 
         self.fx_speed_val = QLabel("1.00x")
         self.fx_speed_val.setStyleSheet("color: #FFFFFF; font-weight: 700; min-width: 48px;")
-        self.fx_speed_slider = QSlider(Qt.Orientation.Horizontal)
+        self.fx_speed_slider = SeekSlider(Qt.Orientation.Horizontal)
+        self.fx_speed_slider.installEventFilter(self._no_wheel_filter)
         self.fx_speed_slider.setRange(60, 140)
         self.fx_speed_slider.setValue(100)
         self.fx_speed_slider.valueChanged.connect(self.on_fx_sliders_changed)
 
         self.fx_pitch_val = QLabel("0.0 st")
         self.fx_pitch_val.setStyleSheet("color: #FFFFFF; font-weight: 700; min-width: 48px;")
-        self.fx_pitch_slider = QSlider(Qt.Orientation.Horizontal)
+        self.fx_pitch_slider = SeekSlider(Qt.Orientation.Horizontal)
+        self.fx_pitch_slider.installEventFilter(self._no_wheel_filter)
         self.fx_pitch_slider.setRange(-60, 60)
         self.fx_pitch_slider.setValue(0)
         self.fx_pitch_slider.valueChanged.connect(self.on_fx_sliders_changed)
 
         self.fx_bass_val = QLabel("0%")
         self.fx_bass_val.setStyleSheet("color: #FFFFFF; font-weight: 700; min-width: 48px;")
-        self.fx_bass_slider = QSlider(Qt.Orientation.Horizontal)
+        self.fx_bass_slider = SeekSlider(Qt.Orientation.Horizontal)
+        self.fx_bass_slider.installEventFilter(self._no_wheel_filter)
         self.fx_bass_slider.setRange(0, 100)
         self.fx_bass_slider.setValue(0)
         self.fx_bass_slider.valueChanged.connect(self.on_fx_sliders_changed)
 
         self.fx_reverb_val = QLabel("0%")
         self.fx_reverb_val.setStyleSheet("color: #FFFFFF; font-weight: 700; min-width: 48px;")
-        self.fx_reverb_slider = QSlider(Qt.Orientation.Horizontal)
+        self.fx_reverb_slider = SeekSlider(Qt.Orientation.Horizontal)
+        self.fx_reverb_slider.installEventFilter(self._no_wheel_filter)
         self.fx_reverb_slider.setRange(0, 100)
         self.fx_reverb_slider.setValue(0)
         self.fx_reverb_slider.valueChanged.connect(self.on_fx_sliders_changed)
@@ -3029,6 +3865,7 @@ class NanoTuneApp(QMainWindow):
         self.time_cur_lbl.setStyleSheet("color: #9EB0AD; font-size: 11px;")
 
         self.seek_slider = SeekSlider(Qt.Orientation.Horizontal)
+        self.seek_slider.installEventFilter(self._no_wheel_filter)
         self.seek_slider.setRange(0, 0)
         self.seek_slider.sliderPressed.connect(lambda: setattr(self, "seeking_active", True))
         self.seek_slider.sliderReleased.connect(self.on_seek_released)
@@ -3066,7 +3903,8 @@ class NanoTuneApp(QMainWindow):
         self.vol_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.vol_btn.clicked.connect(self.toggle_mute)
 
-        self.vol_slider = QSlider(Qt.Orientation.Horizontal)
+        self.vol_slider = SeekSlider(Qt.Orientation.Horizontal)
+        self.vol_slider.installEventFilter(self._no_wheel_filter)
         self.vol_slider.setRange(0, 100)
         self.vol_slider.setFixedWidth(86)
         self.vol_slider.setValue(int(self.audio_output.volume() * 100))
@@ -3093,7 +3931,7 @@ class NanoTuneApp(QMainWindow):
         if hasattr(self, "fx_top_grid"):
             self.fx_top_grid.removeWidget(self.fx_title_lbl)
             self.fx_top_grid.removeWidget(self.fx_presets_row)
-            if self.width() < 980:
+            if self.width() < 1040:
                 self.fx_top_grid.addWidget(self.fx_title_lbl, 0, 0, Qt.AlignmentFlag.AlignLeft)
                 self.fx_top_grid.addWidget(self.fx_presets_row, 1, 0, Qt.AlignmentFlag.AlignLeft)
             else:
@@ -3108,19 +3946,16 @@ class NanoTuneApp(QMainWindow):
         start_w = self.sidebar.width()
         end_w = 72 if self.sidebar_collapsed else 240
 
-        if self.sidebar_collapsed:
-            self.brand_text_wrap.hide()
-            self.sb_status_card.hide()
-            for btn, _ico, _lbl in self.nav_buttons:
-                btn.setText("")
-        else:
-            self.brand_text_wrap.show()
-            self.sb_status_card.show()
-            for btn, _ico, lbl in self.nav_buttons:
-                btn.setText(f"  {lbl}")
-
         def _on_anim(v):
-            self.sidebar.setFixedWidth(int(v))
+            w_int = int(v)
+            self.sidebar.setFixedWidth(w_int)
+            rem = max(0, w_int - 72)
+            self.brand_text_wrap.setFixedWidth(rem)
+            self.bt_lay.setContentsMargins(min(10, rem), 0, 0, 0)
+            show_brand_txt = w_int > 84
+            self.lbl_app.setVisible(show_brand_txt)
+            self.lbl_brand_sub.setVisible(show_brand_txt)
+            self.sb_status_card.setVisible(w_int > 120)
             self.position_sidebar_toggle()
 
         anim = QVariantAnimation(self)
@@ -3130,7 +3965,6 @@ class NanoTuneApp(QMainWindow):
         anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         anim.valueChanged.connect(_on_anim)
         anim.start(QVariantAnimation.DeletionPolicy.DeleteWhenStopped)
-
     def toggle_fullscreen(self):
         if self.isFullScreen():
             self.showNormal()
@@ -3142,7 +3976,7 @@ class NanoTuneApp(QMainWindow):
         if fourl:
             self.lbl_app.setText("4L LAUNCHER")
             self.lbl_brand_sub.setText("YEAT • 4L ERA")
-            self.nav_buttons[4][0].setText("" if self.sidebar_collapsed else "  About 4L")
+            self.nav_buttons[4][0].setText("  About 4L")
             self.about_badge_lbl.setText("DEDICATION & PROJECT TRIBUTE")
             self.about_hdr_lbl.setText("4L Launcher")
             self.about_sub_lbl.setText("Created in dedication to Yeat's 4L project (June 2021)")
@@ -3153,25 +3987,25 @@ class NanoTuneApp(QMainWindow):
                 "unmistakable sound and aesthetic. The 4L Mode palette—charcoal slate, toxic emerald green, "
                 "and pool-cyan accents—is themed straight from the 4L cover art.\n\n"
                 "Built for local lossless music ownership: play your FLAC or MP3 rip of 4L with "
-                "60 FPS animated .LRC / embedded FLAC lyrics, Slowed + Reverb FX, and DirectX 10.1 / OpenGL 2.1 support."
+                "high-FPS animated .LRC / embedded FLAC lyrics, Slowed + Reverb FX, and DirectX 10.1 / OpenGL 2.1 support."
             )
             self.apply_theme_colors(FOURL_ACCENT, FOURL_ACCENT_2)
         else:
             self.lbl_app.setText("NANOTUNE")
             self.lbl_brand_sub.setText("MUSIC PLAYER")
-            self.nav_buttons[4][0].setText("" if self.sidebar_collapsed else "  About")
+            self.nav_buttons[4][0].setText("  About")
             self.about_badge_lbl.setText("LIGHTWEIGHT • NATIVE WINDOWS PLAYER")
             self.about_hdr_lbl.setText("NanoTune")
             self.about_sub_lbl.setText("Fast, lightweight music player for Windows. (DX 10.1 / OpenGL 2.1)")
             self.about_body_lbl.setText(
                 "NanoTune is a clean, lightweight native Windows music player engineered to run smoothly "
                 "even on older DirectX 10.1 and OpenGL 2.1 hardware.\n\n"
-                "Drop in multiple music folders, browse your library by Tracks or Albums, read 60 FPS "
-                "animated .LRC and embedded FLAC lyrics, shape your sound with warm Bass Boost, Speed, "
-                "Pitch, and Reverb FX, and watch the UI & Star icon adapt dynamically to every album cover.\n\n"
+                "Drop in multiple music folders, browse your library by Tracks or Albums, read high-FPS "
+                "animated .ELRC / .LRC and embedded FLAC lyrics, shape your sound with deep Bass Boost, Speed, "
+                "Pitch, Reverb, and Lo-Fi Muffle FX, and watch the UI & Star icon adapt dynamically to every album cover.\n\n"
                 "Created by @mirakwgnr on Instagram."
             )
-            if self.current_index < 0:
+            if not self.active_track_path:
                 self.apply_theme_colors(STAR_DEFAULT_YELLOW, STAR_DEFAULT_YELLOW_2)
 
         self.refresh_tray_status()
@@ -3263,7 +4097,7 @@ class NanoTuneApp(QMainWindow):
                 color: #B4C2C0;
                 border: none;
                 border-radius: 8px;
-                padding: 11px 12px;
+                padding: 11px 11px;
                 text-align: left;
                 font-size: 13px;
                 font-weight: 600;
@@ -3332,6 +4166,26 @@ class NanoTuneApp(QMainWindow):
                 background-color: rgba(__RGB1__, 42);
                 border-color: __AC1__;
                 color: #FFFFFF;
+            }
+
+            QPushButton#lofiToggleBtn {
+                background-color: rgba(255, 255, 255, 15);
+                color: #EAF2F0;
+                border: 1px solid rgba(255, 255, 255, 28);
+                border-radius: 14px;
+                padding: 7px 15px;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QPushButton#lofiToggleBtn:hover {
+                background-color: rgba(255, 255, 255, 28);
+                color: #FFFFFF;
+            }
+            QPushButton#lofiToggleBtn:checked {
+                background-color: rgba(__RGB1__, 42);
+                border: 1px solid __AC1__;
+                color: #FFFFFF;
+                font-weight: 700;
             }
 
             QPushButton#iconBtn {
@@ -3436,6 +4290,7 @@ class NanoTuneApp(QMainWindow):
         for w in (self.lib_cover_widget, self.np_cover_widget, self.about_cover_widget, self.bar_cover_widget):
             w.set_border_color(accent)
 
+        self._bg_scaled_cache = QPixmap()
         self.lyrics_view.set_accent_color(accent)
         self.refresh_all_icons()
         if hasattr(self, "track_list"):
@@ -3471,7 +4326,12 @@ class NanoTuneApp(QMainWindow):
     def update_cover_widgets(self):
         if not hasattr(self, "cover_pixmap") or self.cover_pixmap.isNull():
             return
-        for attr in ("lib_cover_widget", "np_cover_widget", "bar_cover_widget"):
+        targets = (
+            ("np_cover_widget", "bar_cover_widget")
+            if self.active_album_filter
+            else ("lib_cover_widget", "np_cover_widget", "bar_cover_widget")
+        )
+        for attr in targets:
             w = getattr(self, attr, None)
             if w is not None:
                 w.set_pixmap(self.cover_pixmap)
@@ -3508,7 +4368,12 @@ class NanoTuneApp(QMainWindow):
                         mtime = 0.0
 
                     cached = cache.get(key)
-                    if cached and abs(cached.get("mtime", -1) - mtime) < 0.01 and "album_artist" in cached:
+                    if (
+                        cached
+                        and abs(cached.get("mtime", -1) - mtime) < 0.01
+                        and "album_artist" in cached
+                        and "year" in cached
+                    ):
                         meta = dict(cached)
                     else:
                         meta = extract_metadata(f)
@@ -3533,6 +4398,25 @@ class NanoTuneApp(QMainWindow):
 
     def apply_library_filter_view(self):
         fourl_mode = self.is_fourl_mode()
+
+        grouped: dict[str, list[dict]] = {}
+        source_for_albums = [t for t in self.all_tracks if t.get("is_4l")] if fourl_mode else self.all_tracks
+        for t in source_for_albums:
+            alb = t.get("album") or "Unknown Album"
+            grouped.setdefault(alb, []).append(t)
+
+        self.albums_map.clear()
+        for alb, alb_tracks in grouped.items():
+            sample = alb_tracks[0]
+            self.albums_map[sample["album_key"]] = {
+                "album_key": sample["album_key"],
+                "album": alb,
+                "artist": resolve_album_artist(alb_tracks),
+                "year": resolve_album_year(alb_tracks),
+                "count": len(alb_tracks),
+                "sample_track": sample,
+            }
+
         if fourl_mode:
             filtered = [dict(t) for t in self.all_tracks if t.get("is_4l")]
             filtered.sort(key=lambda t: (t["order_no"], t["display_title"].lower()))
@@ -3548,13 +4432,22 @@ class NanoTuneApp(QMainWindow):
                 filtered.sort(key=lambda t: (t["track_no"] or 999, t["display_title"].lower()))
                 for i, t in enumerate(filtered, 1):
                     t["display_num"] = t["track_no"] if t["track_no"] > 0 else i
-                self.lib_tag_lbl.setText("ALBUM")
+
+                alb_year = resolve_album_year(filtered)
+                self.lib_tag_lbl.setText(f"ALBUM  •  {alb_year}" if alb_year else "ALBUM")
                 self.lib_title_lbl.setText(self.active_album_filter)
                 alb_artist = resolve_album_artist(filtered)
                 self.lib_artist_lbl.setText(f"{alb_artist}  •  {len(filtered)} tracks")
                 self.clear_album_btn.setVisible(True)
+
+                if filtered:
+                    sample = filtered[0]
+                    cov_pm = self.album_cover_cache.get(sample["album_key"])
+                    if cov_pm is None:
+                        cov_pil = extract_embedded_cover_from_file(Path(sample["path"]))
+                        cov_pm = self.pil_to_qpixmap(cov_pil) if cov_pil else self.pil_to_qpixmap(self.default_nano_pil)
+                    self.lib_cover_widget.set_pixmap(cov_pm)
             else:
-                # Evenly mix tracks across all albums with continuous 1..N numbering
                 by_album: dict[str, list[dict]] = {}
                 for t in self.all_tracks:
                     by_album.setdefault(t.get("album", ""), []).append(dict(t))
@@ -3573,28 +4466,20 @@ class NanoTuneApp(QMainWindow):
                 self.lib_title_lbl.setText("All Tracks")
                 folders = self.config.get("music_folders", [])
                 f_txt = f"{len(folders)} folder{'s' if len(folders) != 1 else ''}"
-                self.lib_artist_lbl.setText(f"Lightweight Player  •  {f_txt}  •  Adaptive Album Themes")
+                self.lib_artist_lbl.setText(f"{len(filtered)} tracks  •  {len(self.albums_map)} albums  •  {f_txt}")
                 self.clear_album_btn.setVisible(False)
+                if not self.cover_pixmap.isNull():
+                    self.lib_cover_widget.set_pixmap(self.cover_pixmap)
 
         self.tracks = filtered
-        self.rebuild_shuffle_queue()
+        self.current_index = -1
+        if self.active_track_path:
+            for idx, t in enumerate(self.tracks):
+                if t["path"] == self.active_track_path:
+                    self.current_index = idx
+                    break
 
-        grouped: dict[str, list[dict]] = {}
-        source_for_albums = self.tracks if fourl_mode else self.all_tracks
-        for t in source_for_albums:
-            alb = t.get("album") or "Unknown Album"
-            grouped.setdefault(alb, []).append(t)
-
-        self.albums_map.clear()
-        for alb, alb_tracks in grouped.items():
-            sample = alb_tracks[0]
-            self.albums_map[sample["album_key"]] = {
-                "album_key": sample["album_key"],
-                "album": alb,
-                "artist": resolve_album_artist(alb_tracks),
-                "count": len(alb_tracks),
-                "sample_track": sample,
-            }
+        self.rebuild_shuffle_queue(self.current_index)
 
         self.sb_count_lbl.setText(f"{len(self.tracks)} tracks loaded")
         folders = self.config.get("music_folders", [])
@@ -3611,6 +4496,7 @@ class NanoTuneApp(QMainWindow):
             self.populate_albums_grid(force_rebuild=True)
         self.rebuild_tray_track_submenu()
         self.refresh_tray_status()
+        self.update_windows_smtc()
 
     def populate_track_list(self):
         query = normalize_text(self.search_input.text()) if hasattr(self, "search_input") else ""
@@ -3623,7 +4509,7 @@ class NanoTuneApp(QMainWindow):
                 continue
             row_data = dict(tr)
             row_data["index"] = idx
-            row_data["is_current"] = idx == self.current_index
+            row_data["is_current"] = (tr["path"] == self.active_track_path) if self.active_track_path else (idx == self.current_index)
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, row_data)
             self.track_list.addItem(item)
@@ -3684,17 +4570,15 @@ class NanoTuneApp(QMainWindow):
 
     def open_album_from_grid(self, album_name: str):
         self.active_album_filter = album_name
-        self.current_index = -1
         self.apply_library_filter_view()
         self.switch_page(0)
 
     def clear_album_filter(self):
         self.active_album_filter = ""
-        self.current_index = -1
         self.apply_library_filter_view()
 
     # -----------------------------------------------------------------------
-    # True Fisher-Yates Shuffle & Playback
+    # True Fisher-Yates Shuffle & Zero-Restart Audio FX Engine
     # -----------------------------------------------------------------------
     def rebuild_shuffle_queue(self, anchor_index: int = -1):
         n = len(self.tracks)
@@ -3715,6 +4599,7 @@ class NanoTuneApp(QMainWindow):
             or abs(self.fx_pitch) > 0.05
             or self.fx_bass > 0.01
             or self.fx_reverb > 0.01
+            or self.fx_lofi
         )
 
     def stop_fx_sink(self):
@@ -3737,7 +4622,9 @@ class NanoTuneApp(QMainWindow):
         fmt.setSampleFormat(QAudioFormat.SampleFormat.Float)
 
         self.fx_device.set_pcm(pcm_array, start_ms=start_ms)
-        self.fx_device.update_params(self.fx_speed, self.fx_pitch, self.fx_link_pitch, self.fx_bass, self.fx_reverb)
+        self.fx_device.update_params(
+            self.fx_speed, self.fx_pitch, self.fx_link_pitch, self.fx_bass, self.fx_reverb, self.fx_lofi
+        )
         self.fx_device.open(QIODevice.OpenModeFlag.ReadOnly)
 
         self.fx_sink = QAudioSink(QMediaDevices.defaultAudioOutput(), fmt, self)
@@ -3750,10 +4637,17 @@ class NanoTuneApp(QMainWindow):
     def load_and_play(self, index: int):
         if not (0 <= index < len(self.tracks)):
             return
+        self._fx_release_timer.stop()
         self.current_index = index
+        tr = self.tracks[index]
+        self.active_track_path = tr["path"]
+        self._last_known_pos_ms = 0
+        self._seek_guard_until = 0.0
+        self._pending_qt_seek_ms = -1
+        self._pending_qt_play = False
+
         if self.shuffle_enabled and index in self.shuffle_queue:
             self.shuffle_pos = self.shuffle_queue.index(index)
-        tr = self.tracks[index]
 
         if tr.get("is_4l"):
             self.apply_cover_pil(self.default_4l_pil, is_4l_track=True)
@@ -3765,16 +4659,20 @@ class NanoTuneApp(QMainWindow):
         self.fx_decoded_path = ""
         self.fx_decoded_pcm = None
         self.fx_pending_activate = False
+        self.is_playing = True
 
         if self.fx_needed() and HAS_FX_DSP:
+            self._qt_ignore_state_until = time.monotonic() + 0.25
             self.player.stop()
             self.fx_pending_activate = True
             self.fx_pending_seek_ms = 0
-            self.is_playing = True
             self.seek_slider.setRange(0, max(0, tr["duration_ms"]))
+            self.seek_slider.setValue(0)
+            self.time_cur_lbl.setText("0:00")
             self.time_tot_lbl.setText(format_ms(tr["duration_ms"]))
             DecodeWorker(tr["path"], lambda p, pcm, err: self.fxDecodedReady.emit(p, pcm, err)).start()
         else:
+            self._qt_ignore_state_until = 0.0
             self.player.setSource(QUrl.fromLocalFile(tr["path"]))
             self.player.setPlaybackRate(self.fx_speed)
             self.player.play()
@@ -3791,6 +4689,7 @@ class NanoTuneApp(QMainWindow):
         self.np_artist_lbl.setText(QFontMetrics(self.np_artist_lbl.font()).elidedText(artist_alb, Qt.TextElideMode.ElideRight, 520))
 
         self.load_lyrics_for_current_track()
+        self.lyrics_view.set_playback_clock(0, self.is_playing, self.fx_speed, force_snap=True)
         self.update_file_details_panel(tr)
         self.populate_track_list()
         self.refresh_all_icons()
@@ -3798,9 +4697,7 @@ class NanoTuneApp(QMainWindow):
         self.update()
 
     def on_fx_decode_finished(self, path: str, pcm, err: str):
-        if not (0 <= self.current_index < len(self.tracks)):
-            return
-        if self.tracks[self.current_index]["path"] != path:
+        if path != self.active_track_path:
             return
         if pcm is None or err:
             if self.fx_pending_activate:
@@ -3813,10 +4710,16 @@ class NanoTuneApp(QMainWindow):
         self.fx_decoded_pcm = pcm
         if self.fx_pending_activate:
             self.fx_pending_activate = False
-            pos = self.fx_pending_seek_ms or self.player.position()
-            self.player.stop()
+            qt_pos = self.player.position() if self.player.source() == QUrl.fromLocalFile(path) else 0
+            pos = max(self.fx_pending_seek_ms, qt_pos, self._last_known_pos_ms)
+            was_playing = self.is_playing
+            self.fx_active_engine = True
+            self._qt_ignore_state_until = time.monotonic() + 0.30
+            self.player.pause()
             self.start_fx_sink(pcm, pos)
-            self.is_playing = True
+            if not was_playing and self.fx_sink:
+                self.fx_sink.suspend()
+            self.is_playing = was_playing
             self.refresh_all_icons()
             self.refresh_tray_status()
 
@@ -3826,47 +4729,106 @@ class NanoTuneApp(QMainWindow):
         self.fx_bass = self.fx_bass_slider.value() / 100.0
         self.fx_reverb = self.fx_reverb_slider.value() / 100.0
         self.fx_link_pitch = self.chk_link_pitch.isChecked()
+        self.fx_lofi = self.lofi_btn.isChecked()
 
         self.fx_speed_val.setText(f"{self.fx_speed:.2f}x")
         self.fx_pitch_val.setText(f"{self.fx_pitch:+.1f} st")
         self.fx_bass_val.setText(f"{int(self.fx_bass * 100)}%")
         self.fx_reverb_val.setText(f"{int(self.fx_reverb * 100)}%")
 
+        self._fx_param_timer.start()
+
+    def _apply_fx_params_debounced(self):
         if not HAS_FX_DSP:
             self.player.setPlaybackRate(self.fx_speed)
             return
 
-        self.fx_device.update_params(self.fx_speed, self.fx_pitch, self.fx_link_pitch, self.fx_bass, self.fx_reverb)
+        self.fx_device.update_params(
+            self.fx_speed, self.fx_pitch, self.fx_link_pitch, self.fx_bass, self.fx_reverb, self.fx_lofi
+        )
 
-        if 0 <= self.current_index < len(self.tracks):
-            cur_path = self.tracks[self.current_index]["path"]
-            if self.fx_needed() and not self.fx_active_engine:
-                pos = self.player.position()
+        if not self.active_track_path:
+            return
+
+        cur_path = self.active_track_path
+        if self.fx_needed():
+            self._fx_release_timer.stop()
+            self._pending_qt_seek_ms = -1
+            self._pending_qt_play = False
+            if not self.fx_active_engine:
+                use_qt_pos = (
+                    self.player.source() == QUrl.fromLocalFile(cur_path)
+                    and self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+                    and time.monotonic() >= self._seek_guard_until
+                )
+                qt_pos = self.player.position() if use_qt_pos else 0
+                pos = max(qt_pos, self._last_known_pos_ms)
                 if self.fx_decoded_path == cur_path and self.fx_decoded_pcm is not None:
                     was_playing = self.is_playing
-                    self.player.stop()
+                    self.fx_active_engine = True
+                    self._qt_ignore_state_until = time.monotonic() + 0.30
+                    self.player.pause()
                     self.start_fx_sink(self.fx_decoded_pcm, pos)
                     if not was_playing and self.fx_sink:
                         self.fx_sink.suspend()
+                    self.is_playing = was_playing
+                    self.refresh_all_icons()
+                    self.refresh_tray_status()
                 else:
                     self.fx_pending_activate = True
                     self.fx_pending_seek_ms = pos
-            elif not self.fx_needed() and self.fx_active_engine:
-                pos = self.fx_device.get_position_ms()
-                was_playing = self.is_playing
-                self.stop_fx_sink()
-                self.player.setSource(QUrl.fromLocalFile(cur_path))
-                self.player.setPlaybackRate(1.0)
-                QTimer.singleShot(80, lambda: self.player.setPosition(pos))
-                if was_playing:
-                    QTimer.singleShot(100, self.player.play)
+        else:
+            self.fx_pending_activate = False
+            if self.fx_active_engine:
+                self._fx_release_timer.start()
+
+        cur_pos = (
+            self.fx_device.get_position_ms()
+            if self.fx_active_engine
+            else max(self.player.position(), self._last_known_pos_ms)
+        )
+        self.lyrics_view.set_playback_clock(cur_pos, self.is_playing, self.fx_speed)
+
+    def _verify_qt_seek(self, expected_url: QUrl, target_ms: int):
+        if self.fx_active_engine or self.player.source() != expected_url:
+            return
+        if target_ms > 1500 and self.player.position() < target_ms - 1500:
+            self.player.setPosition(target_ms)
+
+    def _release_fx_to_qt(self):
+        if self.fx_needed() or not self.fx_active_engine or not self.active_track_path:
+            return
+        pos = max(self.fx_device.get_position_ms(), self._last_known_pos_ms)
+        was_playing = self.is_playing
+        self._qt_ignore_state_until = time.monotonic() + 0.40
+        self._seek_guard_until = time.monotonic() + 0.30
+        self.stop_fx_sink()
+        self.is_playing = was_playing
+
+        target_url = QUrl.fromLocalFile(self.active_track_path)
+        ready_statuses = (QMediaPlayer.MediaStatus.LoadedMedia, QMediaPlayer.MediaStatus.BufferedMedia)
+        if self.player.source() == target_url and self.player.mediaStatus() in ready_statuses:
+            self.player.setPlaybackRate(1.0)
+            if was_playing:
+                self.player.play()
+                self.player.setPosition(pos)
+                QTimer.singleShot(70, lambda u=target_url, p=pos: self._verify_qt_seek(u, p))
+            else:
+                self.player.setPosition(pos)
+        else:
+            self._pending_qt_seek_ms = pos
+            self._pending_qt_play = was_playing
+            self.player.setSource(target_url)
+            self.player.setPlaybackRate(1.0)
+        self.refresh_all_icons()
+        self.refresh_tray_status()
 
     def apply_fx_preset(self, preset: str):
         presets = {
             "normal": (100, 0, 0, 0, True),
-            "slowed_reverb": (84, 0, 32, 42, True),
-            "bass": (100, 0, 58, 0, True),
-            "nightcore": (118, 0, 14, 10, True),
+            "slowed_reverb": (84, 0, 0, 10, True),
+            "bass": (100, 0, 65, 0, True),
+            "nightcore": (118, 0, 0, 5, True),
         }
         sp, pi, ba, rv, lnk = presets.get(preset, (100, 0, 0, 0, True))
         for w in (self.fx_speed_slider, self.fx_pitch_slider, self.fx_bass_slider, self.fx_reverb_slider, self.chk_link_pitch):
@@ -3888,13 +4850,18 @@ class NanoTuneApp(QMainWindow):
     def on_fx_poll(self):
         if not self.fx_active_engine:
             return
+        if time.monotonic() < self._seek_guard_until:
+            return
         pos = self.fx_device.get_position_ms()
+        if pos > 0:
+            self._last_known_pos_ms = pos
         if not self.seeking_active:
             self.seek_slider.setValue(pos)
             self.time_cur_lbl.setText(format_ms(pos))
+        self.lyrics_view.set_playback_clock(pos, self.is_playing, self.fx_speed)
         self.sync_lyrics_highlight(pos)
 
-        if self.fx_device.ended:
+        if self.fx_device.is_finished():
             self.stop_fx_sink()
             if self.repeat_mode == "one":
                 self.load_and_play(self.current_index)
@@ -3937,7 +4904,7 @@ class NanoTuneApp(QMainWindow):
             self.load_and_play(self.shuffle_queue[0])
 
     def toggle_play_pause(self):
-        if self.current_index < 0:
+        if not self.active_track_path:
             self.play_from_start()
             return
         if self.fx_active_engine and self.fx_sink is not None:
@@ -3947,6 +4914,8 @@ class NanoTuneApp(QMainWindow):
             else:
                 self.fx_sink.resume()
                 self.is_playing = True
+            pos = self.fx_device.get_position_ms()
+            self.lyrics_view.set_playback_clock(pos, self.is_playing, self.fx_speed, force_snap=True)
             self.refresh_all_icons()
             self.refresh_tray_status()
             return
@@ -4008,9 +4977,10 @@ class NanoTuneApp(QMainWindow):
         self.refresh_all_icons()
 
     def on_qt_playback_state_changed(self, state):
-        if self.fx_active_engine:
+        if self.fx_active_engine or time.monotonic() < self._qt_ignore_state_until:
             return
         self.is_playing = state == QMediaPlayer.PlaybackState.PlayingState
+        self.lyrics_view.set_playback_clock(self.player.position(), self.is_playing, self.fx_speed, force_snap=True)
         self.refresh_all_icons()
         self.refresh_tray_status()
         self.update()
@@ -4018,7 +4988,20 @@ class NanoTuneApp(QMainWindow):
     def on_media_status_changed(self, status):
         if self.fx_active_engine:
             return
-        if status == QMediaPlayer.MediaStatus.EndOfMedia:
+        if status in (QMediaPlayer.MediaStatus.LoadedMedia, QMediaPlayer.MediaStatus.BufferedMedia):
+            if self._pending_qt_seek_ms >= 0:
+                seek_pos = self._pending_qt_seek_ms
+                should_play = self._pending_qt_play
+                self._pending_qt_seek_ms = -1
+                self._pending_qt_play = False
+                url = self.player.source()
+                if should_play:
+                    self.player.play()
+                    self.player.setPosition(seek_pos)
+                    QTimer.singleShot(70, lambda u=url, p=seek_pos: self._verify_qt_seek(u, p))
+                else:
+                    self.player.setPosition(seek_pos)
+        elif status == QMediaPlayer.MediaStatus.EndOfMedia:
             if self.repeat_mode == "one":
                 self.player.setPosition(0)
                 self.player.play()
@@ -4037,12 +5020,26 @@ class NanoTuneApp(QMainWindow):
     def on_qt_position_changed(self, pos: int):
         if self.fx_active_engine:
             return
+        if time.monotonic() < self._seek_guard_until:
+            return
+        if pos > 0:
+            self._last_known_pos_ms = pos
         if not self.seeking_active:
             self.seek_slider.setValue(pos)
             self.time_cur_lbl.setText(format_ms(pos))
+        self.lyrics_view.set_playback_clock(pos, self.is_playing, self.fx_speed)
         self.sync_lyrics_highlight(pos)
 
     def seek_to_ms(self, ms: int):
+        ms = max(0, int(ms))
+        self._last_known_pos_ms = ms
+        self._seek_guard_until = time.monotonic() + 0.28
+        self.lyrics_view.set_playback_clock(ms, self.is_playing, self.fx_speed, force_snap=True)
+        if not self.seeking_active:
+            self.seek_slider.setValue(ms)
+        self.time_cur_lbl.setText(format_ms(ms))
+        self.sync_lyrics_highlight(ms)
+
         if self.fx_active_engine:
             self.fx_device.seek_ms(ms)
             if self.fx_sink is not None:
@@ -4051,8 +5048,6 @@ class NanoTuneApp(QMainWindow):
                 self.fx_sink.start(self.fx_device)
                 if not was_playing:
                     self.fx_sink.suspend()
-            self.time_cur_lbl.setText(format_ms(ms))
-            self.sync_lyrics_highlight(ms)
         else:
             self.player.setPosition(ms)
 
@@ -4080,27 +5075,27 @@ class NanoTuneApp(QMainWindow):
         self.refresh_all_icons()
 
     # -----------------------------------------------------------------------
-    # Animated Lyrics Viewing, Syncing & Editing
+    # Animated Lyrics Viewing (.ELRC / .LRC), Syncing & Editing
     # -----------------------------------------------------------------------
     def load_lyrics_for_current_track(self):
         self.active_lyric_row = -1
-        if not (0 <= self.current_index < len(self.tracks)):
+        tr = self._get_active_track_dict()
+        if tr is None:
             return
 
-        tr = self.tracks[self.current_index]
         raw, source = read_lyrics_for_track(tr["path"])
         self.current_lyrics_raw = raw
         self.current_lyrics_source = source
         self.lyrics_editor.setPlainText(raw)
 
-        self.is_synced_lyrics, self.parsed_lyrics = parse_lyrics(raw)
+        self.is_synced_lyrics, self.parsed_lyrics = parse_lrc_text(raw)
         self.lyrics_view.set_font_size(int(self.config.get("lyric_font_size", 19)))
         self.lyrics_view.set_font_family(self.active_font_family)
         self.lyrics_view.set_lyrics(
             self.is_synced_lyrics,
             self.parsed_lyrics,
             empty_msg=(
-                "No embedded FLAC or .LRC lyrics found for this track.\n"
+                "No embedded FLAC, .LRC, or .ELRC lyrics found for this track.\n"
                 "Click 'Enter / Edit Lyrics' on the left to add or sync lyrics!"
             ),
         )
@@ -4109,8 +5104,8 @@ class NanoTuneApp(QMainWindow):
         if not self.is_synced_lyrics or not self.parsed_lyrics or self.editing_lyrics:
             return
         target_row = -1
-        for i, (t_ms, _) in enumerate(self.parsed_lyrics):
-            if pos_ms >= t_ms:
+        for i, entry in enumerate(self.parsed_lyrics):
+            if pos_ms >= entry["time_ms"]:
                 target_row = i
             else:
                 break
@@ -4119,7 +5114,8 @@ class NanoTuneApp(QMainWindow):
             self.lyrics_view.set_active_index(target_row)
 
     def toggle_lyrics_editor(self):
-        if self.current_index < 0:
+        tr = self._get_active_track_dict()
+        if tr is None:
             QMessageBox.information(self, "NanoTune", "Play or select a track first before entering lyrics.")
             return
         self.editing_lyrics = not self.editing_lyrics
@@ -4149,24 +5145,26 @@ class NanoTuneApp(QMainWindow):
         self.lyrics_editor.setFocus()
 
     def save_edited_lyrics(self, to_lrc: bool, to_tag: bool):
-        if not (0 <= self.current_index < len(self.tracks)):
+        tr = self._get_active_track_dict()
+        if tr is None:
             return
-        tr = self.tracks[self.current_index]
         audio_path = Path(tr["path"])
         text = self.lyrics_editor.toPlainText().strip()
         saved_targets = []
 
         if to_lrc:
             try:
-                lrc_path = audio_path.with_suffix(".lrc")
-                lrc_path.write_text(text, encoding="utf-8")
-                saved_targets.append(f".LRC ({lrc_path.name})")
+                existing_elrc = audio_path.with_suffix(".elrc")
+                use_elrc = existing_elrc.exists() or bool(ELRC_WORD_RE.search(text))
+                out_path = existing_elrc if use_elrc else audio_path.with_suffix(".lrc")
+                out_path.write_text(text, encoding="utf-8")
+                saved_targets.append(f"{out_path.suffix.upper()} ({out_path.name})")
             except Exception as exc:
-                QMessageBox.warning(self, "Save .LRC Failed", str(exc))
+                QMessageBox.warning(self, "Save Lyrics File Failed", str(exc))
 
         if to_tag:
             was_playing = self.is_playing and not self.fx_active_engine
-            resume_pos = self.player.position()
+            resume_pos = max(self.player.position(), self._last_known_pos_ms)
             if not self.fx_active_engine:
                 self.player.setSource(QUrl())
             try:
@@ -4199,11 +5197,9 @@ class NanoTuneApp(QMainWindow):
                 QMessageBox.warning(self, "Embed Tag Failed", str(exc))
             finally:
                 if not self.fx_active_engine:
+                    self._pending_qt_seek_ms = resume_pos
+                    self._pending_qt_play = was_playing
                     self.player.setSource(QUrl.fromLocalFile(str(audio_path)))
-                    if resume_pos > 0:
-                        QTimer.singleShot(180, lambda: self.player.setPosition(resume_pos))
-                    if was_playing:
-                        QTimer.singleShot(200, self.player.play)
 
         if saved_targets:
             tr["has_lyrics"] = bool(text)
@@ -4214,7 +5210,7 @@ class NanoTuneApp(QMainWindow):
             QMessageBox.information(self, "Lyrics Saved", "Saved lyrics to:\n• " + "\n• ".join(saved_targets))
 
     # -----------------------------------------------------------------------
-    # Settings Actions
+    # Settings Actions & Clean PyInstaller Restart
     # -----------------------------------------------------------------------
     def add_music_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Add Music Folder")
@@ -4250,7 +5246,6 @@ class NanoTuneApp(QMainWindow):
         self.config["fourl_mode"] = checked
         self.save_config()
         self.active_album_filter = ""
-        self.current_index = -1
         self.apply_mode_branding()
         self.apply_library_filter_view()
 
@@ -4259,9 +5254,10 @@ class NanoTuneApp(QMainWindow):
         self.config["recursive_scan"] = self.chk_recursive.isChecked()
         self.config["always_blur_bg"] = self.chk_always_blur.isChecked()
         self.save_config()
+        self._bg_scaled_cache = QPixmap()
         self.scan_music_folders(self.config.get("music_folders", []))
-        if 0 <= self.current_index < len(self.tracks):
-            tr = self.tracks[self.current_index]
+        tr = self._get_active_track_dict()
+        if tr is not None:
             if tr.get("is_4l"):
                 self.apply_cover_pil(self.default_4l_pil, is_4l_track=True)
             else:
@@ -4288,19 +5284,19 @@ class NanoTuneApp(QMainWindow):
 
     def install_optional_fx(self):
         if getattr(sys, "frozen", False):
-            QMessageBox.information(self, "NanoTune", "Compiled EXE builds include bundled dependencies.")
+            QMessageBox.information(self, "NanoTune", "Compiled builds include bundled dependencies.")
             return
         reply = QMessageBox.question(
             self,
             "Install Audio FX Packages",
-            "Download and install 'numpy' and 'av' via pip so Pitch, Bass Boost, and Reverb work?",
+            "Download and install 'numpy' and 'av' via pip so Pitch, Bass Boost, Reverb, and Lo-Fi Muffle work?",
         )
         if reply == QMessageBox.StandardButton.Yes:
             try:
-                subprocess.check_call([sys.executable, "-m", "pip", "install", "numpy", "av"])
+                pkgs = ["numpy<1.25", "av<11.0"] if IS_LEGACY_WIN else ["numpy", "av"]
+                subprocess.check_call([sys.executable, "-m", "pip", "install", *pkgs])
                 QMessageBox.information(self, "Installed", "FX packages installed! Restarting NanoTune...")
-                args = [sys.executable, str(Path(__file__).resolve())]
-                subprocess.Popen(args)
+                subprocess.Popen([sys.executable, str(Path(__file__).resolve())])
                 QApplication.quit()
             except Exception as exc:
                 QMessageBox.warning(self, "Install Failed", str(exc))
@@ -4321,14 +5317,24 @@ class NanoTuneApp(QMainWindow):
             self.player.stop()
             if hasattr(self, "tray_icon"):
                 self.tray_icon.hide()
+
+            clean_env = os.environ.copy()
+            clean_env.pop("_MEIPASS", None)
+            clean_env.pop("_MEIPASS2", None)
+            clean_env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+
             args = [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, str(Path(__file__).resolve())]
-            subprocess.Popen(args)
-            QApplication.quit()
+            flags = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP) if sys.platform == "win32" else 0
+            subprocess.Popen(args, env=clean_env, creationflags=flags, close_fds=True)
+            QApplication.processEvents()
+            os._exit(0)
 
     def reset_setup(self):
         self.stop_fx_sink()
         self.player.stop()
         self.player.setSource(QUrl())
+        self.active_track_path = ""
+        self._last_known_pos_ms = 0
         self.config["music_folders"] = []
         self.save_config()
         self.folders_list.clear()
@@ -4336,6 +5342,7 @@ class NanoTuneApp(QMainWindow):
         self.tracks = []
         self.current_index = -1
         self.populate_track_list()
+        self.refresh_default_covers()
         self.refresh_tray_status()
         self.startup_check()
 
@@ -4363,6 +5370,23 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("NanoTune")
+
+    if GPU_INCOMPATIBLE_NEED_PROMPT:
+        dlg = GpuCompatibilityDialog(make_mario_star_icon(STAR_DEFAULT_YELLOW, 64))
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            sys.exit(0)
+        cfg_file = get_config_dir() / "config.json"
+        data = {}
+        if cfg_file.exists():
+            try:
+                data = json.loads(cfg_file.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+        data["graphics_backend"] = "software"
+        try:
+            cfg_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception:
+            pass
 
     win = NanoTuneApp()
     win.show()
