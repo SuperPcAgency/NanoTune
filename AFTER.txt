@@ -1,0 +1,27 @@
+NANOTUNE — POST-INSTALLATION GUIDE
+
+Installation is complete. NanoTune is ready to use.
+
+1. QUICK START
+* Music Folders : On first launch, choose one or more music directories
+                  (subfolder scanning is enabled by default).
+* Library Views : Switch between "Tracks", "Albums", and "Now Playing & Lyrics"
+                  from the collapsible sidebar. Cover art is cached for speed.
+* Audio FX Rack : Click "FX" on the player bar to adjust Speed, Pitch, Bass
+                  Boost, Reverb, or toggle the independent "Lo-Fi Muffle".
+* Synced Lyrics : Supports .ELRC (word-by-word), .LRC, and embedded audio tags.
+                  Click any lyric line to seek, or open "Enter / Edit Lyrics"
+                  to stamp timestamps and save directly to file or audio tags.
+
+2. GRAPHICS RENDERER
+NanoTune auto-detects DirectX 10.1/10.0 and OpenGL 2.1/2.0 on first launch.
+If you experience display issues on older drivers, open Settings -> Graphics
+Renderer to switch manually between DirectX, OpenGL, or Software Rendering.
+
+3. USER DATA, DIAGNOSTICS & UNINSTALL
+* Config & Covers : %APPDATA%\NanoTune\config.json  |  %APPDATA%\NanoTune\covers
+* Crash Log       : %APPDATA%\NanoTune\crash.log
+* Registry Key    : HKEY_CURRENT_USER\Software\NanoTune
+* Uninstall       : Remove anytime via Windows "Installed Apps".
+
+Developed by mirakwgnr (@mirakwgnr on Instagram)  •  NanoTune Project (2026)

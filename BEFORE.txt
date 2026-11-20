@@ -1,0 +1,53 @@
+NANOTUNE — PRE-INSTALLATION README & SYSTEM SPECIFICATIONS
+
+1. OVERVIEW
+NanoTune is a lightweight, 100% offline Windows® music player and high-FPS
+lyrics engine developed by mirakwgnr. Engineered for instant library indexing
+and smooth 60–165 Hz rendering across both modern and legacy PC hardware.
+
+2. KEY FEATURES
+* Audio Playback  : Lossless FLAC (16/24-bit), WAV, MP3, M4A, OGG, and OPUS.
+* Real-Time FX    : Speed, Pitch, 155 Hz Deep Sub-Bass, Hall Reverb, and an
+                    independent 1400 Hz RBJ Lo-Fi Muffle filter.
+* Synced Lyrics   : Word-by-word .ELRC karaoke, standard .LRC, and embedded
+                    FLAC/ID3/MP4 lyrics with a built-in timestamp editor.
+* Adaptive UI     : Dynamic accent theming from album art (with B&W silver
+                    mode) and hardware-probed DirectX® 10.1/10.0 or OpenGL® 2.1/2.0.
+* Windows Shell   : Windows® 10/11 SMTC media overlay & system tray controls.
+
+3. SYSTEM REQUIREMENTS
+
+  Component   Minimum                              Recommended
+  ----------- ------------------------------------ -----------------------------
+  OS          Windows® 7 SP1 / 8 / 8.1 (64-bit)*   Windows® 10 (1809+) / 11 (64-bit)
+  Processor   Intel® Core™ i5-650 (3.2 GHz) or     Intel® Core™ i5-6500 (3.2 GHz) or
+              AMD Phenom™ II X4 955 / Athlon™ II   AMD Ryzen™ 3 1200 (3.1 GHz)
+              X2 260 (or equivalent x86-64 CPU)
+  Memory      2 GB RAM (512 MB available)          4 GB RAM or higher (recommended
+                                                   for large FLAC + DSP libraries)
+  Graphics    DirectX® 10.0 or OpenGL® 2.0         DirectX® 10.1 or OpenGL® 2.1
+              compatible GPU (e.g., NVIDIA®        compatible GPU (e.g., NVIDIA®
+              GeForce® 8600 GT / AMD Radeon™       GeForce® GTX 750 Ti / AMD Radeon™
+              HD 2600 XT) or CPU Rasterizer        R7 260X) with 60Hz+ output
+  Storage     150 MB available disk space          250 MB+ SSD (for cover cache)
+  Audio       DirectSound® / WASAPI compatible     WASAPI Exclusive-capable DAC or
+              sound device                         onboard audio chipset
+
+  * Legacy Windows® 7/8/8.1 environments require compatible runtime builds and
+    omit the Windows® 10/11 SMTC lockscreen/volume overlay.
+
+4. PRE-INSTALL CHECKLIST
+* All required dependencies are bundled; no separate Python or third-party
+  codec installations are necessary.
+* Administrator privileges are required only when installing to system-protected
+  directories (e.g., C:\Program Files).
+* Please close all running instances of NanoTune before clicking "Next".
+
+5. TRADEMARK & LEGAL NOTICES
+Microsoft®, Windows®, DirectX®, and DirectSound® are registered trademarks of
+Microsoft Corporation. Intel® and Intel® Core™ are trademarks of Intel
+Corporation. AMD, AMD Ryzen™, AMD Phenom™, AMD Athlon™, and Radeon™ are
+trademarks of Advanced Micro Devices, Inc. NVIDIA® and GeForce® are registered
+trademarks of NVIDIA Corporation. OpenGL® is a registered trademark of Hewlett
+Packard Enterprise. All other trademarks are the property of their respective
+owners.
