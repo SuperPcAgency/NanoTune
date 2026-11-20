@@ -1,3 +1,11 @@
+<img width="1196" height="696" alt="4" src="https://github.com/user-attachments/assets/200df855-cbd5-4c8f-b3d6-0b39b8972fe8" />
+<img width="1196" height="704" alt="3" src="https://github.com/user-attachments/assets/fad66663-a30d-42e9-8a75-443c439cc413" />
+<img width="1197" height="703" alt="2" src="https://github.com/user-attachments/assets/49489222-7d95-4a41-b397-66f0f5ae256e" />
+<img width="1196" height="702" alt="1" src="https://github.com/user-attachments/assets/8d33083f-0592-4046-910a-b255b73106fa" />
+<img width="1179" height="685" alt="8" src="https://github.com/user-attachments/assets/f64143a1-b29d-4110-91b1-c4667357b88d" />
+<img width="1199" height="703" alt="7" src="https://github.com/user-attachments/assets/808c85ea-e392-4dda-9292-896196e17d5c" />
+<img width="1197" height="703" alt="6" src="https://github.com/user-attachments/assets/b906dba7-582f-4fab-8d8f-091e62cce884" />
+<img width="1196" height="705" alt="5" src="https://github.com/user-attachments/assets/2710a2f1-f7c2-4b22-9703-d4e35fa95fa3" />
 # NanoTune
 
 NanoTune is a lightweight, 100% offline Windows music player and high-FPS lyrics engine developed by **mirakwgnr** (`@mirakwgnr` on Instagram). Built for instant library indexing and smooth high-refresh-rate rendering across both modern and legacy PC hardware, it pairs adaptive cover-art theming with a threaded real-time audio FX rack and a word-by-word karaoke lyrics view.
