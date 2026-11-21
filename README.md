@@ -42,7 +42,7 @@ NanoTune is a lightweight, 100% offline Windows music player and high-FPS lyrics
 
 NanoTune operates strictly offline as a local desktop audio player with no telemetry, analytics, or external network calls.
 
-Licensed under the **GNU General Public License v2.0 (GPL-2.0)**. See `LICENSE.txt` or the [full GPL-2.0 license text](https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt) for details.
+Licensed under the **GNU General Public License v2.0 (GPL-2.0)**. See `LICENCE.txt` or the [full GPL-2.0 license text](https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt) for details.
 <img width="1196" height="696" alt="4" src="https://github.com/user-attachments/assets/200df855-cbd5-4c8f-b3d6-0b39b8972fe8" />
 <img width="1196" height="704" alt="3" src="https://github.com/user-attachments/assets/fad66663-a30d-42e9-8a75-443c439cc413" />
 <img width="1197" height="703" alt="2" src="https://github.com/user-attachments/assets/49489222-7d95-4a41-b397-66f0f5ae256e" />
