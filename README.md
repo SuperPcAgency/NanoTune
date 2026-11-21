@@ -18,7 +18,7 @@ NanoTune is a lightweight, 100% offline Windows music player and high-FPS lyrics
 | **OS** | Windows 7 SP1 / 8 / 8.1 (64-bit)* | Windows 10 (1809+) / 11 (64-bit) |
 | **Processor** | Intel Core i5-650 (3.2 GHz) or AMD Phenom II X4 955 / Athlon II X2 260 (or equivalent x86-64 CPU) | Intel Core i5-6500 (3.2 GHz) or AMD Ryzen 3 1200 (3.1 GHz) |
 | **Memory** | 2 GB RAM (512 MB available) | 4 GB RAM or higher (for large FLAC + DSP libraries) |
-| **Graphics** | DirectX 10.0 or OpenGL 2.0 compatible GPU (e.g., GeForce 8600 GT / Radeon HD 2600 XT) or CPU Rasterizer | DirectX 10.1 or OpenGL 2.1 compatible GPU (e.g., GTX 750 Ti / Radeon R7 260X) with 60Hz+ output |
+| **Graphics** | DirectX 10.0 or OpenGL 2.0 compatible GPU (Fallback supported) or CPU Rasterizer | DirectX 10.1 or OpenGL 2.1 compatible GPU (e.g., GTX 750 Ti / Radeon R7 260X) with 60Hz+ output |
 | **Storage** | 150 MB available disk space | 250 MB+ SSD (for cover cache) |
 | **Audio** | DirectSound / WASAPI compatible sound device | WASAPI Exclusive-capable DAC or onboard audio chipset |
 
