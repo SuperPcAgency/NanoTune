@@ -1,4 +1,3 @@
-<img width="1176" height="686" alt="9" src="https://github.com/user-attachments/assets/bc737a29-f639-46a3-981d-06cd8a741a63" />
 # NanoTune
 
 NanoTune is a lightweight, 100% offline Windows music player and high-FPS lyrics engine developed by **mirakwgnr** (`@mirakwgnr` on Instagram). Built for instant library indexing and smooth high-refresh-rate rendering across both modern and legacy PC hardware, it pairs adaptive cover-art theming with a threaded real-time audio FX rack and a word-by-word karaoke lyrics view.
@@ -52,3 +51,4 @@ Licensed under the **GNU General Public License v2.0 (GPL-2.0)**. See `LICENCE.t
 <img width="1199" height="703" alt="7" src="https://github.com/user-attachments/assets/808c85ea-e392-4dda-9292-896196e17d5c" />
 <img width="1197" height="703" alt="6" src="https://github.com/user-attachments/assets/b906dba7-582f-4fab-8d8f-091e62cce884" />
 <img width="1196" height="705" alt="5" src="https://github.com/user-attachments/assets/2710a2f1-f7c2-4b22-9703-d4e35fa95fa3" />
+<img width="1176" height="686" alt="9" src="https://github.com/user-attachments/assets/bc737a29-f639-46a3-981d-06cd8a741a63" />
